@@ -193,7 +193,7 @@ class Dialog(tk.Toplevel):
 
 class NewDownloadDialog(Dialog):
     def __init__(self, master, mgr, preset: dict | None = None):
-        super().__init__(master, "新建下载", 560, 400)
+        super().__init__(master, "新建下载", 560, 520)
         self.mgr = mgr
         preset = preset or {}
         self.v_url = tk.StringVar(value=preset.get("url", ""))
@@ -232,6 +232,8 @@ class NewDownloadDialog(Dialog):
         tk.Label(f, text="保存目录", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=2, column=0, sticky="w", pady=(0, 8))
         self._row(f, "文件名称", self.v_name, 3)
+        tk.Label(f, text="线程数", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
+            row=4, column=0, sticky="w", pady=(0, 8))
         conn_row = tk.Frame(f, bg=BG)
         conn_row.grid(row=4, column=1, sticky="we", pady=(0, 8))
         self._row(conn_row, "", self.v_conns, 0, width=8)
