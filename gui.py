@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.1.1
+小助下载器 · 图形界面  gui.py   v2.2.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -602,8 +602,12 @@ class WebScanDialog(Dialog):
                 self.app.mgr.add_task(it["url"], referer=page, filename=fn,
                                       kind=kind, extra={"audio_only": True})
             else:
+                # 视频模式：检查是否有配对音频，有则标记合并
+                extra = {}
+                if it.get("paired_audio"):
+                    extra["paired_audio"] = it["paired_audio"]
                 self.app.mgr.add_task(it["url"], referer=page, filename=it.get("filename", ""),
-                                      kind=kind)
+                                      kind=kind, extra=extra if extra else None)
         self.app.refresh_now()
         mode = "音频" if audio_only else "视频"
         self.lbl.config(text=f"已加入下载队列：{len(items)} 个{mode}任务", fg=OK)
@@ -910,7 +914,7 @@ class App:
         # 悬停行背景（v1.12.0）。
         # 与状态 tag 无冲突：状态 tag 只设 foreground，这个只设 background。
         self.tree.tag_configure("hover", background="#eef4ff")
-        self.tree.bind("<Double-1>", self._open_selected)
+        self.tree.bind("<Double-1>", self._open_selected_file)
         self.tree.bind("<Button-3>", self._task_menu)
         # v1.12.0：鼠标悬停高亮。20 行以上的表格里，行间错位是常见的"看错行"来源。
         # 实现上只改 tag、不重算内容，开销可忽略。

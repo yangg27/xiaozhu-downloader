@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.1.1
+小助下载器 · 核心引擎  dlcore.py   v2.2.0
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.1.1，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.2.0，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -50,7 +50,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.1.1"
+ENGINE_VERSION = "2.2.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -485,7 +485,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v2.1.1 ★ 关键性能修复）
+# 共享 SSLContext（v2.2.0 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -965,6 +965,9 @@ class DownloadTask:
                     # 音频提取（extra.audio_only）
                     if getattr(self, 'extra', {}).get('audio_only'):
                         self._extract_audio()
+                    # 音视频合并（extra.paired_audio）
+                    if getattr(self, 'extra', {}).get('paired_audio'):
+                        self._merge_with_audio()
                     if self.mgr.on_task_done:
                         try:
                             self.mgr.on_task_done(self)
@@ -1019,6 +1022,48 @@ class DownloadTask:
                 self.created_final = dst
                 self.filename = os.path.basename(dst)
                 self.size = os.path.getsize(dst)
+                self.done_bytes = self.size
+        except Exception:
+            pass
+
+    def _merge_with_audio(self):
+        """下载完成后，自动下载配对音频并用 FFmpeg 合并为完整视频。"""
+        video_path = getattr(self, 'created_final', None)
+        audio_url = self.extra.get('paired_audio') if self.extra else None
+        if not video_path or not os.path.exists(video_path) or not audio_url:
+            return
+        ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg):
+            return
+        # 下载配对音频到同目录
+        audio_path = os.path.splitext(video_path)[0] + "_audio.mp3"
+        try:
+            # 创建音频下载任务（内部走 Manager，避免重复造轮子）
+            t = self.mgr.add_task(audio_url, out_dir=os.path.dirname(video_path),
+                                  filename=os.path.basename(audio_path),
+                                  referer=self.http.referer, cookie=self.http.cookie)
+            # 等待音频下载完成（最多 10 分钟）
+            wait = 0
+            while t.state not in (STATE_DONE, STATE_ERROR, STATE_CANCELLED) and wait < 600:
+                time.sleep(1)
+                wait += 1
+            if t.state != STATE_DONE or not os.path.exists(t.created_final):
+                return
+            audio_path = t.created_final
+            # FFmpeg 合并：视频流 copy + 音频流 copy
+            out_path = os.path.splitext(video_path)[0] + "_merged.mp4"
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", video_path, "-i", audio_path,
+                 "-c:v", "copy", "-c:a", "aac", "-strict", "experimental", out_path],
+                capture_output=True, timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0 and os.path.exists(out_path):
+                # 合并成功：删除分离的视频和音频，保留合并后文件
+                os.remove(video_path)
+                os.remove(audio_path)
+                self.created_final = out_path
+                self.filename = os.path.basename(out_path)
+                self.size = os.path.getsize(out_path)
                 self.done_bytes = self.size
         except Exception:
             pass
@@ -1090,7 +1135,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v2.1.1：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v2.2.0：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
@@ -3014,6 +3059,19 @@ def scan_webpage(url: str, http: HttpHelper | None = None) -> dict:
         push(m2.group(1), "播放器配置")
 
     items = sorted(found.values(), key=lambda x: (x["type"] != "hls", x["filename"]))
+    # 音视频配对：同页面、类型一视频一音频、文件名前缀相似则标记为一对
+    videos = [i for i in items if i["type"] == "hls" or
+              (i["type"] == "media" and not i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg")))]
+    audios = [i for i in items if i["type"] == "media" and
+              i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg"))]
+    for v in videos:
+        vbase = os.path.splitext(v["filename"])[0].lower().replace("_video","").replace("-video","")
+        for a in audios:
+            abase = os.path.splitext(a["filename"])[0].lower().replace("_audio","").replace("-audio","")
+            if vbase == abase or vbase in abase or abase in vbase:
+                v["paired_audio"] = a["url"]
+                a["paired_video"] = v["url"]
+                break
     return {"items": items, "title": title, "page": url}
 
 
