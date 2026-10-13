@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v1.15.0
+小助下载器 · 图形界面  gui.py   v1.16.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -178,6 +178,12 @@ class Dialog(tk.Toplevel):
         self.geometry(f"{w}x{h}")
         self._center(w, h)
         self.bind("<Escape>", lambda e: self.destroy())
+        # 主窗口可能在托盘/最小化状态，强制显示并置顶
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+        self.after(100, lambda: self.attributes("-topmost", False))
 
     def _center(self, w, h):
         self.update_idletasks()
@@ -236,7 +242,12 @@ class NewDownloadDialog(Dialog):
             row=4, column=0, sticky="w", pady=(0, 8))
         conn_row = tk.Frame(f, bg=BG)
         conn_row.grid(row=4, column=1, sticky="we", pady=(0, 8))
-        self._row(conn_row, "", self.v_conns, 0, width=8)
+        # 输入框（不用 _row，避免 grid/pack 混用）
+        e_conn = tk.Entry(conn_row, textvariable=self.v_conns, font=(FONT, 9),
+                          bg="#fff", fg=FG, relief="solid", bd=1,
+                          highlightthickness=1, highlightbackground=BORDER,
+                          highlightcolor=ACCENT, width=8)
+        e_conn.pack(side="left", ipady=4)
         tk.Label(conn_row, text="线程（1-32，越多越快，部分服务器限制）", bg=BG,
                  fg=FG_DIM, font=(FONT, 8)).pack(side="left", padx=(8, 0))
         self._row(f, "Referer", self.v_ref, 5)
