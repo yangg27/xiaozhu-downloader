@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.0.1
+小助下载器 · 图形界面  gui.py   v2.1.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -535,9 +535,13 @@ class WebScanDialog(Dialog):
         self.lbl.pack(side="left")
         tk.Button(bot, text="全部下载", command=self._dl_all, font=(FONT, 10, "bold"),
                   bg=OK, fg="#fff", relief="flat", padx=14, pady=4, cursor="hand2").pack(side="right")
-        tk.Button(bot, text="下载选中", command=self._dl_sel, font=(FONT, 9), bg=ACCENT,
-                  fg="#fff", relief="flat", padx=14, pady=4, cursor="hand2").pack(side="right", padx=6)
-        self.tree.bind("<Double-1>", lambda e: self._dl_sel())
+        tk.Button(bot, text="仅音频", command=lambda: self._dl_sel(audio_only=True),
+                  font=(FONT, 9), bg="#e67e22", fg="#fff", relief="flat", padx=14, pady=4,
+                  cursor="hand2").pack(side="right", padx=6)
+        tk.Button(bot, text="下载视频", command=lambda: self._dl_sel(audio_only=False),
+                  font=(FONT, 9), bg=ACCENT, fg="#fff", relief="flat", padx=14, pady=4,
+                  cursor="hand2").pack(side="right", padx=6)
+        self.tree.bind("<Double-1>", lambda e: self._dl_sel(audio_only=False))
         e.focus_set()
         self.bind("<Return>", lambda ev: self._scan())
 
@@ -572,13 +576,13 @@ class WebScanDialog(Dialog):
             page = res.get("page", "")
             self.app.mgr.add_sniff_items(page, self.items)
 
-    def _dl_sel(self):
+    def _dl_sel(self, audio_only: bool = False):
         sel = self.tree.selection()
         if not sel:
             messagebox.showinfo("提示", "请先选中要下载的资源", parent=self)
             return
         items = [self.items[self.tree.index(i)] for i in sel]
-        self._add(items)
+        self._add(items, audio_only=audio_only)
 
     def _dl_all(self):
         if not self.items:
@@ -586,13 +590,23 @@ class WebScanDialog(Dialog):
             return
         self._add(self.items)
 
-    def _add(self, items: list[dict]):
+    def _add(self, items: list[dict], audio_only: bool = False):
         page = self.v_url.get().strip()
         for it in items:
-            self.app.mgr.add_task(it["url"], referer=page, filename=it.get("filename", ""),
-                                  kind=it.get("type") if it.get("type") == "hls" else "auto")
+            kind = it.get("type") if it.get("type") == "hls" else "auto"
+            if audio_only:
+                # 音频模式：文件名加 .mp3 后缀，dlcore 下载后 FFmpeg 抽音轨
+                fn = it.get("filename", "")
+                if not fn.lower().endswith(".mp3"):
+                    fn = os.path.splitext(fn)[0] + ".mp3"
+                self.app.mgr.add_task(it["url"], referer=page, filename=fn,
+                                      kind=kind, extra={"audio_only": True})
+            else:
+                self.app.mgr.add_task(it["url"], referer=page, filename=it.get("filename", ""),
+                                      kind=kind)
         self.app.refresh_now()
-        self.lbl.config(text=f"已加入下载队列：{len(items)} 个任务", fg=OK)
+        mode = "音频" if audio_only else "视频"
+        self.lbl.config(text=f"已加入下载队列：{len(items)} 个{mode}任务", fg=OK)
         self.after(600, self.destroy if len(items) > 3 else lambda: None)
 
 

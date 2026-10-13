@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.0.1
+小助下载器 · 核心引擎  dlcore.py   v2.1.0
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.0.1，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.1.0，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -50,7 +50,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.0.1"
+ENGINE_VERSION = "2.1.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -485,7 +485,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v2.0.1 ★ 关键性能修复）
+# 共享 SSLContext（v2.1.0 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -962,6 +962,9 @@ class DownloadTask:
                     self.mgr.notify()
                 if self.state == STATE_DONE:
                     self.phase = self.phase if self.phase else "已完成"
+                    # 音频提取（extra.audio_only）
+                    if getattr(self, 'extra', {}).get('audio_only'):
+                        self._extract_audio()
                     if self.mgr.on_task_done:
                         try:
                             self.mgr.on_task_done(self)
@@ -995,6 +998,30 @@ class DownloadTask:
                 self.mgr.on_task_end(self)
             except Exception:
                 LOG.once_exc("on_task_end", "任务收尾处理失败 tid=%s", self.tid)
+
+    def _extract_audio(self):
+        """用 FFmpeg 把已下载的视频/音频文件抽音轨转 MP3。"""
+        src = getattr(self, 'created_final', None)
+        if not src or not os.path.exists(src):
+            return
+        ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg):
+            return
+        dst = os.path.splitext(src)[0] + ".mp3"
+        try:
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", src, "-vn", "-acodec", "libmp3lame",
+                 "-q:a", "2", dst],
+                capture_output=True, timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0 and os.path.exists(dst):
+                os.remove(src)
+                self.created_final = dst
+                self.filename = os.path.basename(dst)
+                self.size = os.path.getsize(dst)
+                self.done_bytes = self.size
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -1063,7 +1090,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v2.0.1：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v2.1.0：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
@@ -2697,7 +2724,7 @@ class Manager:
                  conns: int | None = None, referer: str = "", cookie: str = "",
                  headers: dict | None = None, kind: str = "auto",
                  speed_limit: int | None = None, group: str = "",
-                 start: bool = True) -> DownloadTask:
+                 start: bool = True, extra: dict | None = None) -> DownloadTask:
         conns = int(conns if conns is not None else self.cfg.get("connections", 16))
         speed_limit = int(speed_limit if speed_limit is not None else self.cfg.get("speed_limit", 0))
         out_dir = os.path.abspath(out_dir or self.cfg.get("download_dir"))
@@ -2718,6 +2745,7 @@ class Manager:
                    speed_limit=speed_limit, kind=k, group=group,
                    insecure=bool(self.cfg.get("insecure")),
                    proxy=self.cfg.get("proxy", ""))
+        task.extra = extra or {}
         with self._lock:
             self.tasks[task.tid] = task
             self.order.insert(0, task.tid)
