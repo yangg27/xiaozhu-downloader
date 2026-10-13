@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v1.16.1
+小助下载器 · 核心引擎  dlcore.py   v2.0.1
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v1.16.1，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.0.1，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -50,7 +50,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "1.16.1"
+ENGINE_VERSION = "2.0.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -485,7 +485,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v1.16.1 ★ 关键性能修复）
+# 共享 SSLContext（v2.0.1 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -1063,7 +1063,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v1.16.1：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v2.0.1：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
@@ -2410,6 +2410,30 @@ class HLSDownload(DownloadTask):
         self.phase = f"已完成{note}"
         if self.mgr.cfg.get("delete_tmp_after_done", True):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        # FFmpeg 无损转封装 ts → mp4
+        self._remux_to_mp4(final)
+
+    def _remux_to_mp4(self, src: str):
+        """ts 无损转封装为 mp4。需要 third_party/ffmpeg.exe。"""
+        ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg):
+            return
+        if not src.lower().endswith(".ts"):
+            return
+        dst = os.path.splitext(src)[0] + ".mp4"
+        try:
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", src, "-c", "copy", "-bsf:a", "aac_adtstoasc", dst],
+                capture_output=True, timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0 and os.path.exists(dst):
+                os.remove(src)
+                self.created_final = dst
+                self.filename = os.path.basename(dst)
+                self.size = os.path.getsize(dst)
+                self.done_bytes = self.size
+        except Exception:
+            pass
 
     # ---- 供 FileDownload 内部转交使用（直接跑一轮会话）----
     def run_once(self, host: DownloadTask):

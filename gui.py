@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v1.16.1
+小助下载器 · 图形界面  gui.py   v2.0.1
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -224,9 +224,21 @@ class NewDownloadDialog(Dialog):
         f = tk.Frame(self, bg=BG, padx=18, pady=16)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
-        tk.Label(f, text="下载链接", bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
+        tk.Label(f, text="下载链接（支持多行，每行一个）", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
-        e_url = self._row(f, "下载地址", self.v_url, 1)
+        # 多行 URL 输入
+        url_frame = tk.Frame(f, bg=BG)
+        url_frame.grid(row=1, column=1, sticky="we", pady=(0, 8))
+        self.t_url = tk.Text(url_frame, height=6, font=(FONT, 9), bg="#fff", fg=FG,
+                             relief="solid", bd=1, wrap="none")
+        self.t_url.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(url_frame, orient="vertical", command=self.t_url.yview)
+        sb.pack(side="right", fill="y")
+        self.t_url.configure(yscrollcommand=sb.set)
+        self.t_url.insert("1.0", self.v_url.get())
+        tk.Label(f, text="下载地址", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
+            row=1, column=0, sticky="nw", pady=(0, 8))
         fr = tk.Frame(f, bg=BG)
         fr.grid(row=2, column=1, sticky="we", pady=(0, 8))
         tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
@@ -263,7 +275,7 @@ class NewDownloadDialog(Dialog):
                   bg=ACCENT, fg="#fff", relief="flat", padx=18, pady=5,
                   activebackground=ACCENT_DARK, activeforeground="#fff",
                   cursor="hand2").pack(side="left")
-        e_url.focus_set()
+        self.t_url.focus_set()
         self.bind("<Return>", lambda e: self._ok())
 
     def _pick_dir(self):
@@ -272,14 +284,24 @@ class NewDownloadDialog(Dialog):
             self.v_dir.set(os.path.normpath(d))
 
     def _ok(self):
-        url = self.v_url.get().strip()
-        if not url:
+        raw = self.t_url.get("1.0", "end").strip()
+        if not raw:
             messagebox.showwarning("提示", "请填写下载地址", parent=self)
             return
-        if not url.lower().startswith(("http://", "https://", "ftp://")):
-            url = "http://" + url
+        urls = [u.strip() for u in raw.splitlines() if u.strip()]
+        if not urls:
+            messagebox.showwarning("提示", "请填写下载地址", parent=self)
+            return
+        # 自动补协议
+        fixed = []
+        for u in urls:
+            if not u.lower().startswith(("http://", "https://", "ftp://")):
+                u = "http://" + u
+            fixed.append(u)
         self.result = {
-            "url": url, "out_dir": self.v_dir.get().strip(), "filename": self.v_name.get().strip(),
+            "urls": fixed,  # 多链接
+            "url": fixed[0],  # 兼容单链接
+            "out_dir": self.v_dir.get().strip(), "filename": self.v_name.get().strip(),
             "conns": max(1, min(32, int(self.v_conns.get() or 24))),
             "referer": self.v_ref.get().strip(), "cookie": self.v_cookie.get().strip(),
         }
@@ -301,6 +323,7 @@ class SettingsDialog(Dialog):
         self.v_tmp = tk.BooleanVar(value=bool(c.get("delete_tmp_after_done", True)))
         self.v_insecure = tk.BooleanVar(value=bool(c.get("insecure", False)))
         self.v_port = tk.IntVar(value=int(c.get("port", 8763)))
+        self.v_clipboard = tk.BooleanVar(value=bool(c.get("clipboard_watch", True)))
         # 系统集成状态
         self.si = None
         self.v_autostart = tk.BooleanVar(value=False)
@@ -365,24 +388,28 @@ class SettingsDialog(Dialog):
         cb2 = tk.Checkbutton(f, text="忽略 HTTPS 证书错误（不推荐）", variable=self.v_insecure, bg=BG,
                              fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
         cb2.grid(row=9, column=1, sticky="w", pady=(0, 6))
+        cb5 = tk.Checkbutton(f, text="剪贴板监听（复制链接自动弹新建下载）",
+                             variable=self.v_clipboard, bg=BG,
+                             fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
+        cb5.grid(row=10, column=1, sticky="w", pady=(0, 6))
 
         # ---- 系统集成 ----
-        tk.Frame(f, bg=BORDER, height=1).grid(row=10, column=0, columnspan=3,
+        tk.Frame(f, bg=BORDER, height=1).grid(row=11, column=0, columnspan=3,
                                               sticky="we", pady=(10, 8))
         tk.Label(f, text="系统集成（让浏览器点击下载自动唤起）", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=11, column=0, columnspan=3,
+                 font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=3,
                                                sticky="w", pady=(0, 8))
         cb3 = tk.Checkbutton(f, text="开机自启（后台静默运行，不弹窗）",
                              variable=self.v_autostart, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb3.grid(row=12, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb3.grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 5))
         cb4 = tk.Checkbutton(f, text="注册 xzd:// 协议（扩展可唤起下载器）",
                              variable=self.v_protocol, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb4.grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb4.grid(row=14, column=0, columnspan=2, sticky="w", pady=(0, 5))
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
                                justify="left", wraplength=470)
-        self.lbl_si.grid(row=14, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.lbl_si.grid(row=15, column=0, columnspan=3, sticky="w", pady=(2, 6))
         if self.si is None:
             cb3.config(state="disabled")
             cb4.config(state="disabled")
@@ -434,7 +461,11 @@ class SettingsDialog(Dialog):
             delete_tmp_after_done=bool(self.v_tmp.get()),
             insecure=bool(self.v_insecure.get()),
             port=max(1024, min(65535, int(self.v_port.get() or 8763))),
+            clipboard_watch=bool(self.v_clipboard.get()),
         )
+        # 剪贴板监听开关立即生效
+        if self.app:
+            self.app._clip_enabled = bool(self.v_clipboard.get())
         # 限速立即应用于进行中的任务
         for t in self.mgr.tasks.values():
             if t.speed_limit or limit:
@@ -635,6 +666,12 @@ class App:
         boot_mark("app_init_done")
         # 首帧真正画出之后再打一个点（用户看到界面 = 这个时刻）
         self.root.after(0, lambda: (boot_mark("first_paint"), boot_flush()))
+
+        # ---- 剪贴板监听（复制 URL 自动弹新建下载）----
+        self._clip_last = ""
+        self._clip_enabled = self.mgr.cfg.get("clipboard_watch", True)
+        if self._clip_enabled:
+            threading.Thread(target=self._clipboard_watch, daemon=True).start()
 
     def _write_pid(self):
         try:
@@ -1095,9 +1132,11 @@ class App:
         self.root.wait_window(d)
         if d.result:
             r = d.result
-            self.mgr.add_task(r["url"], out_dir=r["out_dir"], filename=r["filename"],
-                              conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
-                              kind="auto")
+            urls = r.get("urls", [r["url"]])
+            for u in urls:
+                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
+                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
+                                  kind="auto")
             self.refresh_now()
 
     def _paste_url(self):
@@ -1313,6 +1352,34 @@ class App:
         if self.restored and not self.silent:
             _safe_console(f"[{dlcore.APP_NAME}] 已恢复 {self.restored} 个未完成任务（可继续下载）")
         self.root.mainloop()
+
+    # ---- 剪贴板监听 ----
+    def _clipboard_watch(self):
+        """后台线程：每 1.5s 读一次剪贴板，发现新 URL 就弹新建下载。"""
+        import re
+        url_re = re.compile(r"^https?://", re.I)
+        while True:
+            time.sleep(1.5)
+            try:
+                if not self._clip_enabled:
+                    continue
+                txt = self.root.clipboard_get().strip()
+                if txt == self._clip_last or not txt:
+                    continue
+                self._clip_last = txt
+                if url_re.match(txt):
+                    # 主线程弹窗
+                    self.root.after(0, lambda t=txt: self._on_clip_url(t))
+            except Exception:
+                continue
+
+    def _on_clip_url(self, url: str):
+        """剪贴板发现 URL，弹新建下载（自动填好链接）。"""
+        # 已在下载列表里的不重复弹
+        for s in self.mgr.snapshots():
+            if s.get("url") == url and s.get("state") not in (dlcore.STATE_DONE, dlcore.STATE_CANCELLED, dlcore.STATE_ERROR):
+                return
+        self.new_download({"url": url})
 
 
 def _safe_console(msg: str):
