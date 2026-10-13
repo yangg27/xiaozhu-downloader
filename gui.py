@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.2.1
+小助下载器 · 图形界面  gui.py   v2.3.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -195,6 +195,90 @@ class Dialog(tk.Toplevel):
             self.geometry(f"+{x}+{y}")
         except Exception:
             dlcore.LOG.debug('忽略异常：mx = master.winfo_rootx() + master.winfo_width() // 2')
+
+
+class MergeAVDialog(Dialog):
+    """手动选择视频+音频文件，FFmpeg 合并为完整 MP4。"""
+    def __init__(self, master, app):
+        super().__init__(master, "音视频合并", 560, 330)
+        self.app = app
+        self.v_video = tk.StringVar()
+        self.v_audio = tk.StringVar()
+        self.v_out = tk.StringVar()
+        self.v_status = tk.StringVar(value="选择已下载的视频（无声）和音频文件，合并为完整 MP4")
+        self._build()
+
+    def _file_row(self, parent, label, var, r, ftypes):
+        tk.Label(parent, text=label, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
+            row=r, column=0, sticky="w", pady=(0, 10))
+        e = tk.Entry(parent, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG,
+                     relief="solid", bd=1, highlightthickness=1,
+                     highlightbackground=BORDER, highlightcolor=ACCENT, width=44)
+        e.grid(row=r, column=1, sticky="we", pady=(0, 10), ipady=4)
+        tk.Button(parent, text="浏览", font=(FONT, 9), bg="#eef1f6", fg=FG,
+                  relief="flat", padx=10, cursor="hand2",
+                  command=lambda: self._pick(var, ftypes)).grid(
+            row=r, column=2, padx=(8, 0), pady=(0, 10))
+
+    def _pick(self, var, ftypes):
+        p = filedialog.askopenfilename(parent=self, filetypes=ftypes)
+        if p:
+            var.set(p)
+            if var is self.v_video and not self.v_out.get():
+                self.v_out.set(os.path.splitext(p)[0] + "_merged.mp4")
+
+    def _build(self):
+        f = tk.Frame(self, bg=BG, padx=18, pady=16)
+        f.pack(fill="both", expand=True)
+        f.columnconfigure(1, weight=1)
+        tk.Label(f, text="手动合并音视频（适用于音视频分离的文件，如 B站 m4s）",
+                 bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        self._file_row(f, "视频文件", self.v_video, 1,
+                       [("视频文件", "*.mp4 *.m4s *.flv *.mkv *.ts *.webm"), ("全部文件", "*.*")])
+        self._file_row(f, "音频文件", self.v_audio, 2,
+                       [("音频文件", "*.m4a *.m4s *.mp3 *.aac *.wav *.flac"), ("全部文件", "*.*")])
+        self._file_row(f, "输出路径", self.v_out, 3, [("MP4 视频", "*.mp4")])
+        tk.Label(f, textvariable=self.v_status, bg=BG, fg=FG_DIM, font=(FONT, 9),
+                 wraplength=500, justify="left").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(2, 10))
+        btns = tk.Frame(f, bg=BG)
+        btns.grid(row=5, column=0, columnspan=3, sticky="e")
+        tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9),
+                  bg="#eef1f6", fg=FG, relief="flat", padx=16, pady=5,
+                  cursor="hand2").pack(side="left", padx=(0, 8))
+        self.btn_merge = tk.Button(btns, text="开始合并", command=self._merge,
+                                   font=(FONT, 10, "bold"), bg=ACCENT, fg="#fff",
+                                   relief="flat", padx=16, pady=5, cursor="hand2")
+        self.btn_merge.pack(side="left")
+
+    def _merge(self):
+        v, a, o = self.v_video.get().strip(), self.v_audio.get().strip(), self.v_out.get().strip()
+        if not v or not os.path.exists(v):
+            messagebox.showwarning("提示", "请选择视频文件", parent=self)
+            return
+        if not a or not os.path.exists(a):
+            messagebox.showwarning("提示", "请选择音频文件", parent=self)
+            return
+        if not o:
+            o = os.path.splitext(v)[0] + "_merged.mp4"
+            self.v_out.set(o)
+        self.btn_merge.config(state="disabled")
+        self.v_status.set("正在合并…（大文件可能需要几十秒）")
+
+        def work():
+            ok, msg = dlcore.merge_av(v, a, o)
+            def done():
+                self.btn_merge.config(state="normal")
+                if ok:
+                    self.v_status.set(f"合并成功：{msg}")
+                    messagebox.showinfo("完成", f"合并成功！\n{msg}", parent=self)
+                    self.destroy()
+                else:
+                    self.v_status.set(f"合并失败：{msg}")
+                    messagebox.showerror("失败", f"合并失败：\n{msg}", parent=self)
+            self.after(0, done)
+        threading.Thread(target=work, daemon=True).start()
 
 
 class NewDownloadDialog(Dialog):
@@ -861,6 +945,7 @@ class App:
         btn(inner, "+ 新建下载", self.new_download, primary=True)
         btn(inner, "粘贴链接", self._paste_url)
         btn(inner, "分析网页", lambda: WebScanDialog(self.root, self))
+        btn(inner, "音视频合并", lambda: MergeAVDialog(self.root, self))
         tk.Label(inner, text="│", bg=CARD, fg=BORDER, font=(FONT, 12)).pack(side="left", padx=6)
         btn(inner, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()))
         btn(inner, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()))

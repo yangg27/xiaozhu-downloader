@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.2.1
+小助下载器 · 核心引擎  dlcore.py   v2.3.0
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.2.1，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.3.0，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -41,6 +41,7 @@ import random
 import re
 import shutil
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -50,7 +51,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.2.1"
+ENGINE_VERSION = "2.3.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -177,6 +178,32 @@ def app_root() -> str:
     if is_frozen():
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def merge_av(video_path: str, audio_path: str, out_path: str = "") -> tuple:
+    """用 FFmpeg 合并本地视频与音频文件（视频流 copy，音频转 AAC）。
+    返回 (是否成功, 输出路径 或 错误信息)。"""
+    ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
+    if not os.path.exists(ffmpeg):
+        return False, "未找到 third_party/ffmpeg.exe"
+    if not video_path or not os.path.exists(video_path):
+        return False, "视频文件不存在"
+    if not audio_path or not os.path.exists(audio_path):
+        return False, "音频文件不存在"
+    if not out_path:
+        out_path = os.path.splitext(video_path)[0] + "_merged.mp4"
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-y", "-i", video_path, "-i", audio_path,
+             "-c:v", "copy", "-c:a", "aac", "-strict", "experimental", out_path],
+            capture_output=True, timeout=600,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True, out_path
+        err = (r.stderr or b"").decode("utf-8", "ignore").strip().splitlines()
+        return False, (err[-1] if err else "FFmpeg 合并失败")
+    except Exception as e:
+        return False, str(e)
 
 
 def data_root() -> str:
@@ -485,7 +512,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v2.2.1 ★ 关键性能修复）
+# 共享 SSLContext（v2.3.0 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -1135,7 +1162,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v2.2.1：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v2.3.0：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
