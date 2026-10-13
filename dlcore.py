@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v1.16.0
+小助下载器 · 核心引擎  dlcore.py   v1.16.1
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v1.16.0，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v1.16.1，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -50,7 +50,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "1.16.0"
+ENGINE_VERSION = "1.16.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -485,7 +485,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v1.16.0 ★ 关键性能修复）
+# 共享 SSLContext（v1.16.1 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -1063,7 +1063,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v1.16.0：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v1.16.1：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
@@ -2916,6 +2916,13 @@ _QUOTED_STREAM = re.compile(r'''["']([^"']+\.(?:m3u8|mpd)(?:\?[^"']*)?)["']''', 
 
 def scan_webpage(url: str, http: HttpHelper | None = None) -> dict:
     http = http or HttpHelper()
+    # 如果 URL 本身就是媒体/流直链，直接返回，不再抓 HTML
+    low = url.lower().split("?")[0]
+    if low.endswith(STREAM_EXTS) or low.endswith(MEDIA_EXTS):
+        t = "hls" if low.endswith(STREAM_EXTS) else "media"
+        return {"items": [{"url": url, "type": t,
+                           "filename": filename_from_url(url), "source": "直链"}],
+                "title": "", "page": url}
     html, _, _ = http.get_text(url, limit=8 * 1024 * 1024)
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
