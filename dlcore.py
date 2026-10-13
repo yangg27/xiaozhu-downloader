@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.2.0
+小助下载器 · 核心引擎  dlcore.py   v2.2.1
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,7 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.2.0，启动提速 6.3s）
+9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.2.1，启动提速 6.3s）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -50,7 +50,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.2.0"
+ENGINE_VERSION = "2.2.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -485,7 +485,7 @@ def unique_path(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# 共享 SSLContext（v2.2.0 ★ 关键性能修复）
+# 共享 SSLContext（v2.2.1 ★ 关键性能修复）
 #
 # ⚠ 血泪教训：原先 `_new_conn()` 里写的是
 #       ctx = self._ssl_ctx or ssl.create_default_context()
@@ -1135,7 +1135,7 @@ class FileDownload(DownloadTask):
     def _probe(self):
         self.phase = "探测服务器"
         self.mgr.notify()
-        # ★ v2.2.0：先把共享 SSLContext 预热好再发探测请求。
+        # ★ v2.2.1：先把共享 SSLContext 预热好再发探测请求。
         # 探测本身就要建一条 TLS 连接 —— 这里创建 context 属于"本来就要付一次"，
         # 但它会把 0.49s 的证书加载成本从**每个工作线程**（24× = 串行 6.3s）
         # 收敛成全局一次。放在探测前做，后续 24 个线程全部直接复用。
@@ -3059,10 +3059,32 @@ def scan_webpage(url: str, http: HttpHelper | None = None) -> dict:
         push(m2.group(1), "播放器配置")
 
     items = sorted(found.values(), key=lambda x: (x["type"] != "hls", x["filename"]))
-    # 音视频配对：同页面、类型一视频一音频、文件名前缀相似则标记为一对
-    videos = [i for i in items if i["type"] == "hls" or
-              (i["type"] == "media" and not i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg")))]
-    audios = [i for i in items if i["type"] == "media" and
+    # 音视频配对：B站 DASH 格式 视频ID_u1-1-编号.m4s
+    # 规律：同视频ID下，编号小的（3xxxx）是音频，编号大的（1xxxxx）是视频
+    import re as _re
+    dash_groups: dict[str, list] = {}
+    for i in items:
+        fn = i["filename"]
+        m = _re.match(r"^(\d+_u\d+-\d+)-(\d+)\.(m4s|mp4|m4a)$", fn, _re.I)
+        if m:
+            prefix, num, ext = m.groups()
+            key = prefix
+            if key not in dash_groups:
+                dash_groups[key] = []
+            dash_groups[key].append({"item": i, "num": int(num), "ext": ext.lower()})
+    for prefix, group in dash_groups.items():
+        if len(group) < 2:
+            continue
+        # 按编号排序：小编号=音频，大编号=视频
+        group.sort(key=lambda x: x["num"])
+        audio = group[0]["item"]   # 最小
+        video = group[-1]["item"]  # 最大
+        video["paired_audio"] = audio["url"]
+        audio["paired_video"] = video["url"]
+    # 通用配对：文件名含 video/audio 前缀
+    videos = [i for i in items if "paired_audio" not in i and (i["type"] == "hls" or
+              (i["type"] == "media" and not i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg"))))]
+    audios = [i for i in items if "paired_video" not in i and i["type"] == "media" and
               i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg"))]
     for v in videos:
         vbase = os.path.splitext(v["filename"])[0].lower().replace("_video","").replace("-video","")
