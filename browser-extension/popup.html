@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 400px; max-height: 560px; background: #fff; color: #1f2329;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px; display: flex; flex-direction: column;
+  }
+  .head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 13px; background: #f7f8fa; border-bottom: 1px solid #e3e6eb;
+  }
+  .title { font-weight: 600; font-size: 13.5px; }
+  .title span { color: #7a828e; font-weight: 400; font-size: 11.5px; margin-left: 5px; }
+  .acts { display: flex; gap: 6px; }
+  button {
+    border: none; border-radius: 5px; padding: 5px 11px; cursor: pointer;
+    font-size: 12px; font-family: inherit; background: #eef1f6; color: #1f2329;
+  }
+  button:hover { background: #e2e7ee; }
+  button.primary { background: #2f6fed; color: #fff; }
+  button.primary:hover { background: #1f5bd4; }
+  button.mini { padding: 4px 9px; font-size: 11.5px; }
+  .status { padding: 9px 13px; font-size: 12px; color: #7a828e; border-bottom: 1px solid #f0f2f5; }
+  .status.warn { color: #d93025; }
+  .status.ok { color: #0f9d58; }
+  .list { overflow-y: auto; flex: 1; max-height: 400px; }
+  .row {
+    display: flex; align-items: center; gap: 8px; padding: 8px 13px;
+    border-bottom: 1px solid #f5f6f8;
+  }
+  .row:hover { background: #f7f9fd; }
+  .tag { font-size: 10.5px; padding: 2px 6px; border-radius: 4px; background: #eef1f6; color: #5a6472; flex: 0 0 auto; }
+  .tag.hls { background: #e7f0ff; color: #2f6fed; }
+  .tag.video { background: #e8f7ee; color: #0f9d58; }
+  .tag.audio { background: #fdf1e3; color: #f29900; }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .size { color: #7a828e; font-size: 11.5px; min-width: 52px; text-align: right; flex: 0 0 auto; }
+  .empty { padding: 34px 14px; text-align: center; color: #7a828e; line-height: 2; }
+  .empty span { font-size: 11.5px; color: #a0a7b2; }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 13px; border-top: 1px solid #e3e6eb; background: #fafbfc;
+  }
+  .foot .hint { color: #7a828e; font-size: 11.5px; }
+  .takeover {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 13px; border-top: 1px solid #e3e6eb; background: #fff;
+  }
+  .tk-label { font-size: 11.5px; color: #7a828e; }
+  .takeover select {
+    font-family: inherit; font-size: 11.5px; padding: 4px 6px;
+    border: 1px solid #e3e6eb; border-radius: 5px; background: #fff;
+    color: #1f2329; cursor: pointer; outline: none;
+  }
+  .takeover select:hover { border-color: #2f6fed; }
+  .wake { padding: 8px 13px 10px; border-bottom: 1px solid #f0f2f5; }
+  .wake button { width: 100%; padding: 7px 11px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="title">本页媒体 <span id="count"></span></div>
+    <div class="acts">
+      <button class="mini" id="btn-scan">分析页面</button>
+      <button class="mini" id="btn-clear">清空</button>
+    </div>
+  </div>
+  <div class="status" id="status">正在检测下载器…</div>
+  <div class="wake" id="wake-row" style="display:none">
+    <button class="primary" id="btn-wake" style="width:100%">启动小助下载器</button>
+  </div>
+  <div class="list" id="list"></div>
+  <div class="foot">
+    <span class="hint" id="hint">嗅探到的媒体均可直接下载</span>
+    <button class="primary" id="btn-all">全部下载</button>
+  </div>
+  <div class="takeover">
+    <span class="tk-label">浏览器下载接管</span>
+    <select id="takeover">
+      <option value="all">全部下载（推荐）</option>
+      <option value="media">仅媒体与压缩包</option>
+      <option value="off">关闭</option>
+    </select>
+  </div>
+
+<script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "小助下载器 · 媒体嗅探",
+  "version": "1.1.0",
+  "description": "嗅探网页音视频并接管浏览器下载，自动转交本机小助下载器满速下载。支持 Chrome / Edge，完全本地不上报。",
+  "minimum_chrome_version": "102",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "tabs",
+    "contextMenus",
+    "downloads",
+    "scripting",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "小助下载器 · 媒体嗅探"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

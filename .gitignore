@@ -1,0 +1,30 @@
+# ---- 构建产物 ----
+build/
+build_app/
+build_setup/
+dist/
+dist_app/
+dist_setup/
+*.spec.bak
+
+# ---- 开发/测试目录（不随源码发布）----
+_t/
+
+# ---- 运行时数据 ----
+data/
+data_idle/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
