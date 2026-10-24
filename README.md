@@ -20,6 +20,7 @@
 | **音视频合并** | 自动配对+手动合并双模式，FFmpeg 合成有声有画面的完整 MP4（适用 B站音视频分离） |
 | **断点续传** | **1MB 粒度位图**记录，关机 / 崩溃 / 强杀后仍能精确续传 |
 | **HLS 下载** | 自动解析 m3u8（含多清晰度选择、AES-128 解密），分片并行后自动合并 |
+| **aria2c 备用极速通道** | 内置 aria2c + N_m3u8DL-RE；失败/超时/无进展时一键切换，无需额外安装 |
 | **接管浏览器下载** | Chrome / Edge 点链接直接转交本工具，多线程下载 |
 | **点链接自动唤起** | 下载器没开时，浏览器一点下载就自动把它静默拉起来 |
 | **开机自启 + 后台静默** | 开机自动进后台，只留托盘图标，不弹窗不打扰 |
@@ -55,8 +56,8 @@
 
 ### 方式一：安装包（推荐，无需 Python）
 
-下载 **[`xiaozhu-downloader-v2.4.0-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v2.4.0-setup.exe)**
-（29.9 MB）→ 拷到任意 Windows 11 → **双击安装**。
+下载 **[`xiaozhu-downloader-v2.5.0-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v2.5.0-setup.exe)**
+（32.0 MB）→ 拷到任意 Windows 11 → **双击安装**。
 安装后自动完成开机自启 + `xzd://` 协议注册，无需管理员权限。
 
 ### 方式二：源码运行（需要带 tkinter 的 Python 3）

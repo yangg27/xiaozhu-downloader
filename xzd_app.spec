@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-小助下载器 · PyInstaller 打包配置（v1.13.0）
+小助下载器 · PyInstaller 打包配置（v2.5.0）
 ==========================================
 产物形态：**one-dir**（`小助下载器.exe` + `_internal/`），不是 one-file。
 
@@ -16,12 +16,16 @@
     协议图标的 DefaultIcon 路径也才有效。
   · 同时把 tray.ico 塞一份进 _internal/（打包内），
     万一用户只拷了 exe+_internal 而漏了同级 ico，托盘也不会变成白板。
+  · third_party/aria2/ 内置 aria2c.exe + N_m3u8DL-RE.exe（v2.5.0），
+    安装包自包含，用户无需额外安装即可使用 aria2c 备用极速通道。
 
 体积取舍（实测）：
   · Pillow  7.0 MB  → 带。托盘「下载中/出错/暂停」三色图标靠它生成；
                        没有它托盘只能永远是同一个图标，状态反馈差一档。
   · cryptography 10.3 MB → 带。HLS(m3u8) 的 AES-128 解密走它；
                        没有它会退化到纯 Python AES（慢 20~50 倍，拖垮 m3u8 下载）。
+  · aria2c 5.4 MB + N_m3u8DL-RE 16.4 MB → 带。v2.5.0 备用极速通道必需，
+                       安装后即可直接用，不再依赖外部安装。
   · numpy/pandas/matplotlib/pip/setuptools → **排除**（与本程序毫无关系，
                        不带它们能省 120MB+）。
 """
@@ -48,11 +52,13 @@ a = Analysis(
     datas=[
         # 内嵌一份图标（兜底）：one-dir 下会落到 _internal/
         (os.path.join(ROOT, "tray.ico"), "."),
+        # v2.5.0：内置 aria2c + N_m3u8DL-RE，安装包自包含，无需用户安装
+        (os.path.join(ROOT, "third_party", "aria2"), "third_party/aria2"),
     ],
     hiddenimports=[
         # gui.py 内部有惰性 import（import tray / import sysintegration），
         # 静态分析看不到，必须显式声明，否则运行到那一步会 ImportError
-        "tray", "localserver", "sysintegration", "dlcore",
+        "tray", "localserver", "sysintegration", "dlcore", "aria2_bridge",
         "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk",
         "http.server", "http.client", "urllib.request", "urllib.parse",
         "urllib.error", "urllib.response", "ssl", "_ssl", "socket", "select",

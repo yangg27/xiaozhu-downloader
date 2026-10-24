@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.4.0
+小助下载器 · 图形界面  gui.py   v2.5.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
   · 多线程下载，实时速度 / 进度 / 剩余时间
   · 任务队列：暂停 / 继续 / 删除 / 动态加速（增加连接数）
+  · 内置 aria2c 备用极速通道（v2.5.0），失败或手动一键切换
   · 嗅探面板：承接浏览器扩展推来的媒体链接，一键下载
   · 设置：连接数 / 限速 / 并发任务数 / 代理 / 保存目录
   · 全程不联网校验、不检查更新、不弹注册框
@@ -950,6 +951,8 @@ class App:
         btn(inner, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()))
         btn(inner, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()))
         btn(inner, "清除已完成", self.clear_done)
+        # v2.5.0：aria2c 备用极速通道（首页显式入口）
+        btn(inner, "⚡ aria2c 极速重试", self.retry_selected_with_aria2)
         right = tk.Frame(inner, bg=CARD)
         right.pack(side="right")
         btn(right, "设置", self._open_settings_panel)
@@ -1012,6 +1015,8 @@ class App:
         self.ctx.add_command(label="暂停", command=self.pause_selected)
         self.ctx.add_command(label="增加 8 个线程", command=lambda: self.boost_selected(8))
         self.ctx.add_command(label="增加 16 个线程", command=lambda: self.boost_selected(16))
+        self.ctx.add_separator()
+        self.ctx.add_command(label="⚡ 用 aria2c 极速重试", command=self.retry_selected_with_aria2)
         self.ctx.add_separator()
         self.ctx.add_command(label="打开文件", command=self._open_selected_file)
         self.ctx.add_command(label="打开所在文件夹", command=self._open_selected)
@@ -1281,6 +1286,29 @@ class App:
             self.lbl_status.config(text=f"已为 {n} 个任务增加 {k} 个线程")
         else:
             messagebox.showinfo("提示", "请选中正在下载的任务（HLS 已完成分片并行，无需加速）",
+                                parent=self.root)
+        self.refresh_now()
+
+    def retry_selected_with_aria2(self):
+        """v2.5.0：选中失败/暂停任务 → 切到内置 aria2c 备用通道重试。"""
+        n = 0
+        skipped = 0
+        for tid in self._selected_tids():
+            t = self.mgr.get(tid)
+            if not t:
+                continue
+            if t.state in (dlcore.STATE_ERROR, dlcore.STATE_PAUSED):
+                if t.retry_with_aria2():
+                    n += 1
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+        if n:
+            self.lbl_status.config(text=f"已用 aria2c 重试 {n} 个任务")
+        else:
+            messagebox.showinfo("提示", "请选中出错或已暂停的任务后再点「aria2c 极速重试」\n"
+                                "该通道使用软件内置的 aria2c，无需额外安装。",
                                 parent=self.root)
         self.refresh_now()
 

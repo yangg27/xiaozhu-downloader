@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.4.0
+小助下载器 · 核心引擎  dlcore.py   v2.5.0
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -13,7 +13,8 @@
   6. 完全离线       —— 不联网校验、不更新、不注册、不弹窗
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
-9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.3.0，启动提速 6.3s）
+  9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.3.0，启动提速 6.3s）
+ 10. aria2c 备用极速通道 —— 内置 aria2c，失败/手动一键切换（v2.5.0）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -51,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.4.0"
+ENGINE_VERSION = "2.5.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -989,6 +990,64 @@ class DownloadTask:
     def add_connections(self, k: int = 8):
         return self.mgr.add_connections(self, k)
 
+    def retry_with_aria2(self) -> bool:
+        """任务失败后，切换为内置 aria2c 备用通道重试。
+
+        返回 True 表示已发起重试（在后台线程跑），False 表示无法重试。
+        """
+        try:
+            import aria2_bridge
+        except Exception as exc:
+            self.err = f"aria2c 备用通道不可用：{exc}"
+            self.mgr.notify()
+            return False
+        if self.state not in (STATE_ERROR, STATE_PAUSED, STATE_WAIT):
+            # 已完成/已取消的任务不重试
+            return False
+        self.state = STATE_WAIT
+        self.err = ""
+        self.phase = "排队中（aria2c 备用）"
+        self.mgr.notify()
+
+        def work():
+            try:
+                self._slot_held = False
+                # 释放旧槽位（如果还占着）
+                self.mgr.release_slot(self)
+                # 占用新槽位
+                if not self.mgr.acquire_slot(self):
+                    self.state = STATE_ERROR
+                    self.err = "aria2c 重试：无法获得并发槽位"
+                    self.phase = "出错"
+                    self.mgr.notify()
+                    return
+                self.state = STATE_DOWNLOADING
+                self.phase = "启动 aria2c 备用通道"
+                self.mgr.notify()
+                result = aria2_bridge.run_aria2(
+                    self.url, self.out_dir, filename=self.filename,
+                    referer=self.http.referer, cookie=self.http.cookie,
+                    headers=dict(self.http.extra),
+                    user_agent=self.http.ua,
+                    proxy=self.http._proxy,
+                    connections=min(16, self.requested_conns),
+                    task=self)
+                if not result.get("ok"):
+                    self.state = STATE_ERROR
+                    self.err = f"aria2c 备用失败：{result.get('error', '未知')}"
+                    self.phase = "出错"
+                # 成功由 run_aria2 自动更新 task 状态
+            except Exception as exc:
+                self.state = STATE_ERROR
+                self.err = f"aria2c 重试异常：{exc}"
+                self.phase = "出错"
+            finally:
+                self.mgr.release_slot(self)
+                self.mgr.save_jobs()
+                self.mgr.notify()
+        threading.Thread(target=work, daemon=True, name=f"xzd-aria2-{self.tid}").start()
+        return True
+
     def set_speed_limit(self, bps: int):
         self.speed_limit = max(0, int(bps or 0))
         self.limiter.set_rate(self.speed_limit)
@@ -1068,8 +1127,8 @@ class DownloadTask:
                     self._session()
                 except Exception as e:  # noqa
                     self.state = STATE_ERROR
-                    self.err = f"{type(e).__name__}: {e}"
-                    self.phase = "出错"
+                    self.err = f"{type(e).__name__}: {e}。可右键任务 → 用 aria2c 极速重试"
+                    self.phase = "出错（可用 aria2c 重试）"
                 finally:
                     self.mgr.release_slot(self)
                     self.mgr.save_jobs()
@@ -1090,17 +1149,12 @@ class DownloadTask:
                     return
         except BaseException as e:
             # v1.11.0：任务主循环**最后一道防线**。
-            # 这里若漏出去，线程会带异常静默死亡 → 任务永远停在"下载中"，
-            # 界面卡死不动，用户只能重启软件（最痛恨的"假死"）。
-            # 注意捕获 BaseException：KeyboardInterrupt/SystemExit 也要先把
-            # 状态置为出错，否则同样会留下僵尸任务。
             try:
                 if self.state not in (STATE_DONE, STATE_CANCELLED):
                     self.state = STATE_ERROR
-                    self.err = f"内部异常 {type(e).__name__}: {e}"
-                    self.phase = "内部错误"
+                    self.err = f"内部异常 {type(e).__name__}: {e}。可右键任务 → 用 aria2c 极速重试"
+                    self.phase = "内部错误（可用 aria2c 重试）"
             except Exception:
-                # 连"置为出错态"都失败（极端情况）：不掩盖，让下面的 LOG 仍然执行
                 pass
             LOG.exc("任务主循环未捕获异常 tid=%s（已强制置为出错态）", self.tid,
                     level=40)
@@ -1553,8 +1607,8 @@ class FileDownload(DownloadTask):
                 self._await_prealloc(timeout=10.0)
                 self._shutdown_tl_handles()
                 self.state = STATE_ERROR
-                self.err = self._fatal
-                self.phase = "出错"
+                self.err = f"{self._fatal}。可右键任务 → 用 aria2c 极速重试"
+                self.phase = "出错（可用 aria2c 重试）"
                 return
             if self._is_done():
                 self._stop_workers = True
@@ -1580,8 +1634,8 @@ class FileDownload(DownloadTask):
                 self._spawn_workers(max(1, min(4, self.target)))
                 if now() - self._last_progress_t > 120:
                     self.state = STATE_ERROR
-                    self.err = "长时间无数据进展，已停止重试"
-                    self.phase = "出错"
+                    self.err = "长时间无数据进展，已停止重试。可右键任务 → 用 aria2c 极速重试"
+                    self.phase = "出错（可用 aria2c 重试）"
                     self._save_state()
                     return
             self.phase = f"{self.active_conns()} 线程 · 区块 {self.nblocks - len(self._missing_blocks())}/{self.nblocks}"
@@ -2124,12 +2178,13 @@ class FileDownload(DownloadTask):
                     return
                 if "HTTP 4" in str(e) or "HTTP 5" in str(e):
                     self.state = STATE_ERROR
-                    self.err = str(e)
+                    self.err = f"{e}。可右键任务 → 用 aria2c 极速重试"
+                    self.phase = "出错（可用 aria2c 重试）"
                     return
                 if consec_fail >= SINGLE_MAX_CONSEC_FAIL:
                     self.state = STATE_ERROR
-                    self.err = (f"连续 {consec_fail} 次连接失败，已停止：{last_err}"
-                                f"（可点『继续』重试）")
+                    self.err = (f"连续 {consec_fail} 次连接失败，已停止：{last_err}。"
+                                f"可右键任务 → 用 aria2c 极速重试")
                     LOG.once_exc("single_give_up",
                                  "单流下载放弃 tid=%s 连续失败 %d 次", self.tid, consec_fail,
                                  level=40)
@@ -2672,8 +2727,8 @@ class HLSDownload(DownloadTask):
             self._session()
         except Exception as e:  # noqa
             self.state = STATE_ERROR
-            self.err = f"{type(e).__name__}: {e}"
-            self.phase = "出错"
+            self.err = f"{type(e).__name__}: {e}。可右键任务 → 用 aria2c 极速重试"
+            self.phase = "出错（可用 aria2c 重试）"
         host.size = self.size
         host.done_bytes = self.done_bytes
         host.progress = self.progress
