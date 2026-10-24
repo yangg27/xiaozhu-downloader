@@ -56,7 +56,7 @@
 
 ### 方式一：安装包（推荐，无需 Python）
 
-下载 **[`xiaozhu-downloader-v2.5.3-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v2.5.3-setup.exe)**
+下载 **[`xiaozhu-downloader-v2.6.0-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v2.6.0-setup.exe)**
 （32.0 MB）→ 拷到任意 Windows 11 → **双击安装**。
 安装后自动完成开机自启 + `xzd://` 协议注册，无需管理员权限。
 

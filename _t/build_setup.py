@@ -4,7 +4,7 @@
 build_setup.py · 小助下载器安装包构建脚本
 ============================================
 把 dist_app/小助下载器 打包成单个可执行安装包：
-  dist_setup/小助下载器_v2.5.3_安装包.exe
+  dist_setup/小助下载器_v2.6.0_安装包.exe
 
 安装器行为：
   1. 自解压到 %LOCALAPPDATA%\Programs\小助下载器
@@ -35,7 +35,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "2.5.3"
+VERSION = "2.6.0"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")

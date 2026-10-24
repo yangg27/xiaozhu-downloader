@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.5.3
+小助下载器 · 图形界面  gui.py   v2.6.0
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
   · 多线程下载，实时速度 / 进度 / 剩余时间
   · 任务队列：暂停 / 继续 / 删除 / 动态加速（增加连接数）
-  · 内置 aria2c 备用极速通道（v2.5.3），失败或手动一键切换
+  · 内置 aria2c 备用极速通道（v2.6.0），失败或手动一键切换
   · 嗅探面板：承接浏览器扩展推来的媒体链接，一键下载
   · 设置：连接数 / 限速 / 并发任务数 / 代理 / 保存目录
   · 全程不联网校验、不检查更新、不弹注册框
@@ -951,7 +951,7 @@ class App:
         btn(inner, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()))
         btn(inner, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()))
         btn(inner, "清除已完成", self.clear_done)
-        # v2.5.3：aria2c 备用极速通道（首页显式入口）
+        # v2.6.0：aria2c 备用极速通道（首页显式入口）
         btn(inner, "⚡ aria2c 极速重试", self.retry_selected_with_aria2)
         right = tk.Frame(inner, bg=CARD)
         right.pack(side="right")
@@ -1290,7 +1290,7 @@ class App:
         self.refresh_now()
 
     def retry_selected_with_aria2(self):
-        """v2.5.3：选中失败/暂停任务 → 切到内置 aria2c 备用通道重试。"""
+        """v2.6.0：选中失败/暂停任务 → 切到内置 aria2c 备用通道重试。"""
         n = 0
         skipped = 0
         for tid in self._selected_tids():
