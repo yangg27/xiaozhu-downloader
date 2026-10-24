@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.3.1
+小助下载器 · 核心引擎  dlcore.py   v2.3.2
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -51,7 +51,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.3.1"
+ENGINE_VERSION = "2.3.2"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -653,6 +653,30 @@ class HttpHelper:
             return None          # 代理 / 自定义 SSL 上下文：交给 urllib 更稳妥
         return (scheme, host, port, path)
 
+    def _host_key(self, url: str):
+        """把 URL 拆成**主机级**连接池 key：(scheme, host, port)。
+
+        用于 HLS 这种同一服务器上请求大量不同分片 URL 的场景：
+        分片 URL 的 path 各不相同，但主机相同，完全可以在一条长连接上
+        串行发多个 GET（HTTP/1.1 keep-alive），避免每个分片都重新 TCP/TLS 握手。
+        返回 None 表示该 URL 不适合走连接池（交由 urllib 处理）。
+        """
+        try:
+            u = urllib.parse.urlsplit(url)
+        except Exception:
+            return None
+        scheme = (u.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return None
+        host = u.hostname
+        if not host:
+            return None
+        default_port = 443 if scheme == "https" else 80
+        port = u.port or default_port
+        if self._proxy or self._ctx_override is not None:
+            return None
+        return (scheme, host, port)
+
     def _new_conn(self, scheme: str, host: str, port: int, timeout: float):
         import http.client
         if scheme == "https":
@@ -680,14 +704,14 @@ class HttpHelper:
             self._tl.pool = d
         return d
 
-    def conn_get(self, url: str, extra: dict | None = None,
-                 timeout: float = SOCKET_TIMEOUT):
-        """用连接池发一个 GET，返回 (response, conn, key)。"""
-        key = self._url_key(url)
-        if key is None:
-            return None, None, None
-        scheme, host, port, path = key
-        pool = self._tl_pool()
+    def _conn_request(self, pool: dict, key, url: str, path: str,
+                      extra: dict | None, timeout: float):
+        """连接池 GET 的公共实现。返回 (resp, conn, key) 或 (None,None,None)。
+
+        key 的前三个元素必须是 (scheme, host, port)，用于建连；
+        后续元素（如 path）只影响池 key，不影响连接目标。
+        """
+        scheme, host, port = key[:3]
         conn = pool.get(key)
         for attempt in (0, 1):
             try:
@@ -706,6 +730,39 @@ class HttpHelper:
                 if attempt:          # 第二次仍失败 → 放弃，交由 urllib
                     break
         return None, None, None
+
+    def conn_get(self, url: str, extra: dict | None = None,
+                 timeout: float = SOCKET_TIMEOUT):
+        """用连接池发一个 GET，返回 (response, conn, key)。
+
+        key 为完整 URL（含 path），适用于普通多线程分块下载：同文件、
+        同 URL、不同 Range，一条连接串行服务多个 Range 请求。
+        """
+        key = self._url_key(url)
+        if key is None:
+            return None, None, None
+        scheme, host, port, path = key
+        pool = self._tl_pool()
+        return self._conn_request(pool, key, url, path, extra, timeout)
+
+    def conn_get_host(self, url: str, extra: dict | None = None,
+                      timeout: float = SOCKET_TIMEOUT):
+        """用**主机级**连接池发一个 GET，返回 (response, conn, key)。
+
+        key 只到 (scheme, host, port)，适用于 HLS 分片下载：同一主机的
+        不同分片 URL 复用同一条长连接，省掉每个分片一次的 TCP/TLS 握手。
+        """
+        key = self._host_key(url)
+        if key is None:
+            return None, None, None
+        try:
+            path = urllib.parse.urlsplit(url).path or "/"
+            if urllib.parse.urlsplit(url).query:
+                path += "?" + urllib.parse.urlsplit(url).query
+        except Exception:
+            return None, None, None
+        pool = self._tl_pool()
+        return self._conn_request(pool, key, url, path, extra, timeout)
 
     def conn_release(self, key, conn, keep: bool):
         """归还连接：keep=True 且服务器允许 → 存回线程专属池；否则关闭。"""
@@ -2405,24 +2462,54 @@ class HLSDownload(DownloadTask):
 
         def fetch(i: int):
             path = self._seg_file(i)
+            conn_key = None
+            conn = None
             for attempt in range(MAX_RETRY):
                 if stop.is_set() or self._stop:
                     return
                 if self.state in (STATE_PAUSED, STATE_CANCELLED):
                     return
                 try:
-                    with self.http.open(self.segments[i]) as r:
-                        buf = bytearray()
-                        while True:
-                            if stop.is_set() or self._stop:
-                                return
-                            if self.state == STATE_PAUSED:
-                                return
-                            d = r.read(READ_SIZE)
-                            if not d:
-                                break
-                            self.limiter.consume(len(d))
-                            buf.extend(d)
+                    # ---- v2.3.2：HLS 分片走主机级连接池 ----
+                    # 同一 m3u8 的成百上千个分片通常落在同一主机，
+                    # 按主机复用长连接可避免每个分片都重新 TCP/TLS 握手。
+                    # 连接池失败（代理/异常 URL/两次建连失败）则降级到 urllib。
+                    resp, conn, conn_key = self.http.conn_get_host(self.segments[i])
+                    if resp is not None:
+                        try:
+                            status = getattr(resp, "status", 200)
+                            if status not in (200, 206):
+                                raise IOError(f"HTTP {status}")
+                            buf = bytearray()
+                            while True:
+                                if stop.is_set() or self._stop:
+                                    return
+                                if self.state == STATE_PAUSED:
+                                    return
+                                d = resp.read(READ_SIZE)
+                                if not d:
+                                    break
+                                self.limiter.consume(len(d))
+                                buf.extend(d)
+                        finally:
+                            keep = conn is not None and self.http.is_keepalive(resp)
+                            self.http.conn_release(conn_key, conn, keep)
+                    else:
+                        with self.http.open(self.segments[i]) as r:
+                            status = getattr(r, "status", 200)
+                            if status not in (200, 206):
+                                raise IOError(f"HTTP {status}")
+                            buf = bytearray()
+                            while True:
+                                if stop.is_set() or self._stop:
+                                    return
+                                if self.state == STATE_PAUSED:
+                                    return
+                                d = r.read(READ_SIZE)
+                                if not d:
+                                    break
+                                self.limiter.consume(len(d))
+                                buf.extend(d)
                     if key:
                         buf = bytearray(self._decrypt(bytes(buf), key, self._seg_iv(i)))
                     tmp = path + ".tmp"
@@ -2438,6 +2525,13 @@ class HLSDownload(DownloadTask):
                         self.phase = f"分片 {self.done_segments}/{total}"
                     return
                 except Exception as e:  # noqa
+                    # 出错路径：若连接已建立则关闭（状态不可信），下次重试新建连接
+                    if conn is not None:
+                        try:
+                            self.http.conn_release(conn_key, conn, False)
+                        except Exception:
+                            pass
+                        conn = None
                     if attempt >= MAX_RETRY - 1:
                         with self._seg_lock:
                             fatal["err"] = f"分片 {i} 下载失败：{e}"
