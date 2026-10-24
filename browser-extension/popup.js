@@ -62,6 +62,12 @@ function render(res) {
     name.className = 'name';
     name.textContent = it.filename || it.url;
     name.title = it.url;
+    const frame = document.createElement('span');
+    if (it.fromFrame) {
+      frame.className = 'frame';
+      frame.textContent = '内嵌框架';
+      frame.title = '来自内嵌框架（iframe）';
+    }
     const size = document.createElement('span');
     size.className = 'size';
     size.textContent = fmtSize(it.size);
@@ -80,7 +86,7 @@ function render(res) {
         : ('失败：' + ((r && r.error) || '未知'));
       setTimeout(() => { btn.textContent = '下载'; }, 2200);
     });
-    row.append(tag, name, size, btn);
+    row.append(tag, name, frame, size, btn);
     list.appendChild(row);
   });
 }

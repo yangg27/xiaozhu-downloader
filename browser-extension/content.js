@@ -11,6 +11,7 @@
   if (window.__XZD_INJECTED__) return;
   window.__XZD_INJECTED__ = true;
 
+  const IS_IFRAME = window.self !== window.top;
   const PANEL_ID = 'xzd-float-panel';
 
   // ------------------------- 页面媒体扫描 -------------------------
@@ -60,6 +61,10 @@
   function reportDom() {
     const items = scanDom();
     if (!items.length) return;
+    // iframe 内扫描到的资源，带上 fromFrame 标记，便于用户识别来源
+    if (IS_IFRAME) {
+      items.forEach((it) => { it.fromFrame = true; });
+    }
     try {
       chrome.runtime.sendMessage({ cmd: 'addFound', items: items.slice(0, 40) }, () => void 0);
     } catch (e) { /* 扩展已重载 */ }
@@ -197,8 +202,11 @@
         row.className = 'xzd-row';
         const tag = it.type === 'hls' ? 'HLS' : it.type === 'video' ? '视频'
           : it.type === 'audio' ? '音频' : it.type === 'file' ? '文件' : '媒体';
+        const frameLabel = it.fromFrame
+          ? '<span class="xzd-frame" title="来自内嵌框架（iframe）">内嵌框架</span>' : '';
         row.innerHTML = `<span class="xzd-tag xzd-tag-${it.type}">${tag}</span>` +
           `<span class="xzd-name" title="${it.url.replace(/"/g, '&quot;')}">${it.filename}</span>` +
+          frameLabel +
           `<span class="xzd-size">${fmtSize(it.size)}</span>` +
           `<button class="xzd-btn xzd-primary xzd-one">下载</button>`;
         row.querySelector('.xzd-one').addEventListener('click', (e) => {
@@ -224,6 +232,13 @@
 
   // ------------------------- 启动 -------------------------
   function boot() {
+    // iframe 内只负责扫描并上报媒体，不创建悬浮按钮/面板，
+    // 避免一页面多个 iframe 时弹出多个 UI。
+    if (IS_IFRAME) {
+      reportDom();
+      [2500, 6000].forEach((t) => setTimeout(reportDom, t));
+      return;
+    }
     if (document.getElementById('xzd-float-btn')) return;
     createButton();
     reportDom();

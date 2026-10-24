@@ -115,11 +115,19 @@
 #xzd-float-panel .xzd-tag-video { background: #e8f7ee; color: #0f9d58; }
 #xzd-float-panel .xzd-tag-audio { background: #fdf1e3; color: #f29900; }
 #xzd-float-panel .xzd-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #1f2329;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: #1f2329;
+}
+#xzd-float-panel .xzd-frame {
+	flex: 0 0 auto;
+	font-size: 10.5px;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: #fff2e8;
+	color: #d94818;
 }
 #xzd-float-panel .xzd-size { flex: 0 0 auto; color: #7a828e; font-size: 11.5px; min-width: 52px; text-align: right; }
 #xzd-float-panel .xzd-empty { padding: 26px 12px; text-align: center; color: #7a828e; line-height: 1.9; }

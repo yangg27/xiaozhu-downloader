@@ -127,6 +127,8 @@ function record(tabId, url, opts = {}) {
     page: store.page || '',
     referer: opts.referer || store.page || '',
     from: opts.from || 'network',
+    frameId: opts.frameId != null ? opts.frameId : null,
+    fromFrame: !!opts.fromFrame,
     ts: Date.now()
   };
   store.items.unshift(item);
@@ -167,7 +169,9 @@ chrome.webRequest.onHeadersReceived.addListener(
             : ctype.startsWith('audio') ? 'audio' : 'media'),
       size: sizeOf(details.responseHeaders),
       referer: details.initiator || store.page,
-      from: hit ? 'network' : 'mime'
+      from: hit ? 'network' : 'mime',
+      frameId: details.frameId,
+      fromFrame: details.frameId !== 0
     });
   },
   { urls: ['<all_urls>'] },
@@ -270,8 +274,13 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const store = tabStore(tabId);
         let n = 0;
         (msg.items || []).forEach((it) => {
-          if (record(tabId, it.url, { type: it.type, filename: it.filename,
-                                      from: 'dom' })) n++;
+          if (record(tabId, it.url, {
+            type: it.type,
+            filename: it.filename,
+            from: 'dom',
+            frameId: sender.frameId != null ? sender.frameId : null,
+            fromFrame: !!it.fromFrame
+          })) n++;
         });
         reply({ ok: true, added: n, total: store.items.length });
         break;
