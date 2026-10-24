@@ -18,6 +18,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -28,6 +29,8 @@ jobs:
           pip install pyinstaller
 
       - name: Build main app
+        env:
+          PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: python _t/build_app.py
 
       - name: Build installer
