@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.5.0
+小助下载器 · 核心引擎  dlcore.py   v2.5.3
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -14,7 +14,7 @@
   7. 长期稳定运行   —— 全局异常兜底 + 僵尸任务自愈 + 磁盘空间预检 + 失败有上限
   8. 免 Python 分发 —— 可冻结为独立 exe + 双击安装包（v1.13.0）
   9. 共享 SSLContext —— 并发 TLS 建连不再串行化（v2.3.0，启动提速 6.3s）
- 10. aria2c 备用极速通道 —— 内置 aria2c，失败/手动一键切换（v2.5.0）
+ 10. aria2c 备用极速通道 —— 内置 aria2c，失败/手动一键切换（v2.5.3）
 
 设计要点（aria2 同款思路）：
   · 目标文件一次性预分配，多个工作线程各持独立文件句柄，随机写入
@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.5.0"
+ENGINE_VERSION = "2.5.3"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
