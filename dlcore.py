@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.3.2
+小助下载器 · 核心引擎  dlcore.py   v2.4.0
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -51,7 +51,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.3.2"
+ENGINE_VERSION = "2.4.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
