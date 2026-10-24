@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.3.0
+小助下载器 · 核心引擎  dlcore.py   v2.3.1
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -51,7 +51,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.3.0"
+ENGINE_VERSION = "2.3.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -762,29 +762,40 @@ class HttpHelper:
 # --------------------------------------------------------------------------
 
 class RateLimiter:
+    # 单块单次消费至少 READ_SIZE（256KB），令牌桶上限不得低于该值，
+    # 否则 consume(n) 永远无法满足，出现死循环（限速 1~127 KB/s 时卡死）。
+    _MIN_BURST = READ_SIZE
+
     def __init__(self, rate_bps: int = 0):
         self.rate = max(0, int(rate_bps or 0))
-        self._tokens = float(self.rate)
+        # 初始令牌直接装满到 burst，避免低速时第一次 consume 要等几十秒。
+        self._tokens = float(max(self._MIN_BURST, self.rate))
         self._ts = now()
         self._lock = threading.Lock()
 
     def set_rate(self, rate_bps: int):
         with self._lock:
             self.rate = max(0, int(rate_bps or 0))
-            self._tokens = float(min(self.rate, self._tokens))
+            burst = max(self._MIN_BURST, self.rate)
+            self._tokens = float(min(burst, self._tokens))
 
     def consume(self, n: int):
         if self.rate <= 0:
             return
+        n = max(1, int(n))
+        # 小限速下仍允许一次性预支一个完整数据块，避免永久阻塞。
+        # 这相当于在低速时把实际突发提到 READ_SIZE，保证功能可用。
+        burst = max(self._MIN_BURST, self.rate)
         while True:
             with self._lock:
                 t = now()
-                self._tokens = min(self.rate * 2.0,
+                self._tokens = min(burst,
                                    self._tokens + (t - self._ts) * self.rate)
                 self._ts = t
                 if self._tokens >= n:
                     self._tokens -= n
                     return
+                # 要满足 n，需要等的时间；rate=0 上面已返回，不会除零。
                 wait = (n - self._tokens) / float(self.rate)
             time.sleep(min(max(wait, 0.005), 0.25))
 
@@ -1884,6 +1895,12 @@ class FileDownload(DownloadTask):
                     off, buf = item
                     f.seek(off)
                     f.write(buf)
+                except Exception as e:
+                    # 单块写盘失败不要直接判整个任务死刑：
+                    # 先登记失败状态，让 _write_at 降级到同步路径再试一次；
+                    # 同步路径仍失败时，上层 download 循环会把任务置 error。
+                    self._fatal = f"写盘线程异常 {type(e).__name__}: {e}"
+                    LOG.error("写盘线程异常，将触发同步降级: %s", e)
                 finally:
                     self._wr_pending -= 1
                     self._wr_free.set()
@@ -2336,10 +2353,10 @@ class HLSDownload(DownloadTask):
         except Exception:
             out = pure_aes_cbc_decrypt(data, key, iv)
             return out
-        if out:
-            pad = out[-1]
-            if 1 <= pad <= 16 and out[-pad:] == bytes([pad]) * pad:
-                out = out[:-pad]
+        # HLS AES-128 加密分片**不做** PKCS7 padding（TS 分片长度已保证为
+        # 16 字节整数倍）。这里一旦剥离 padding，当真实视频数据末尾恰好
+        # 形成合法 padding 模式时就会静默丢失数据，导致花屏或音画不同步。
+        # 因此直接返回原始解密数据。
         return out
 
     # ---- 会话 ----
@@ -2931,27 +2948,31 @@ class Manager:
 
     # ---- 持久化 ----
     def save_jobs(self):
-        try:
-            data = []
-            for tid in self.order:
-                t = self.tasks.get(tid)
-                if not t:
-                    continue
-                data.append({
-                    "tid": t.tid, "url": t.url, "out_dir": t.out_dir,
-                    "filename": t.filename, "kind": t.kind,
-                    "conns": t.requested_conns, "state": t.state,
-                    "referer": t.http.referer, "group": t.group,
-                    "added_at": t.added_at, "speed_limit": t.speed_limit,
-                    "size": t.size,
-                })
-            tmp = self.jobs_path() + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.jobs_path())
-        except Exception:
-            # 任务列表存不下 → 重启后任务"凭空消失"，用户会当成丢数据
-            LOG.once_exc("save_jobs", "任务列表保存失败（重启后可能丢失）")
+        # save_jobs 在多线程热路径被频繁调用（下载进度更新等），
+        # 必须串行化，避免并发写同一个 .tmp 文件导致 PermissionError
+        # 或写出损坏的 jobs.json（用户日志里已复现）。
+        with self._lock:
+            try:
+                data = []
+                for tid in self.order:
+                    t = self.tasks.get(tid)
+                    if not t:
+                        continue
+                    data.append({
+                        "tid": t.tid, "url": t.url, "out_dir": t.out_dir,
+                        "filename": t.filename, "kind": t.kind,
+                        "conns": t.requested_conns, "state": t.state,
+                        "referer": t.http.referer, "group": t.group,
+                        "added_at": t.added_at, "speed_limit": t.speed_limit,
+                        "size": t.size,
+                    })
+                tmp = self.jobs_path() + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.jobs_path())
+            except Exception:
+                # 任务列表存不下 → 重启后任务"凭空消失"，用户会当成丢数据
+                LOG.once_exc("save_jobs", "任务列表保存失败（重启后可能丢失）")
 
     def load_jobs(self, auto_start: bool = False) -> int:
         """恢复上次未完成的任务；返回恢复条数"""
