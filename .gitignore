@@ -8,7 +8,8 @@ dist_setup/
 *.spec.bak
 
 # ---- 开发/测试目录（不随源码发布）----
-_t/
+# 构建脚本现在随仓库发布，供 GitHub Actions 使用
+# _t/
 
 # ---- 运行时数据 ----
 data/
