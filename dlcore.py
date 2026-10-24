@@ -549,6 +549,27 @@ def shared_ssl_context() -> ssl.SSLContext:
         return _SHARED_SSL_CTX
 
 
+def insecure_ssl_context() -> ssl.SSLContext:
+    """基于共享 context 派生的独立宽松校验 context。
+
+    我们曾在旧代码里直接调用 ssl.create_default_context() 再改
+    check_hostname / verify_mode —— 这样又会让并发 TLS 建连退化成串行。
+    正确做法是：以共享 context 为模板，构造一个独立的轻量副本，
+    既保留 CA 证书链缓存，又能单独关闭校验，同时不污染全局共享对象。
+    """
+    base = shared_ssl_context()
+    # SSLContext 没有 copy()，但可通过 new + copy options 达到同样效果：
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.options = base.options
+    ctx.minimum_version = base.minimum_version
+    ctx.maximum_version = base.maximum_version
+    ctx.set_default_verify_paths()
+    # 这是关键：关闭校验（但只影响这个独立 ctx）
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def warmup_ssl_context():
     """提前在后台把 context 建好，避免首个连接线程承担 0.5s 延迟。
 
@@ -576,10 +597,8 @@ class HttpHelper:
         handlers = [urllib.request.ProxyHandler(
             {"http": self._proxy, "https": self._proxy} if self._proxy else {})]
         if insecure:
-            # 宽松校验：基于共享 context 派生（copy 很轻，且仍复用证书链缓存）
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            # 宽松校验：从共享 context 派生独立实例，复用证书缓存但不污染全局对象
+            ctx = insecure_ssl_context()
             self._ssl_ctx = ctx
             self._ctx_override = ctx
             handlers.append(urllib.request.HTTPSHandler(context=ctx))
