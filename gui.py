@@ -1610,23 +1610,38 @@ class App:
 
     # ---- 剪贴板监听 ----
     def _clipboard_watch(self):
-        """后台线程：每 1.5s 读一次剪贴板，发现新 URL 就弹新建下载。"""
-        import re
-        url_re = re.compile(r"^https?://", re.I)
+        """后台线程：每 1.5s 提醒主线程检查一次剪贴板。
+
+        Tkinter 的 clipboard_get() 必须在主线程调用，否则在部分环境下
+        会抛 Tcl_AsyncDelete 或返回空。因此后台线程只做定时触发，
+        实际读取、判断、弹窗全部通过 after() 调度到主线程完成。
+        """
         while True:
             time.sleep(1.5)
             try:
-                if not self._clip_enabled:
+                if not self._clip_enabled or not self.root:
                     continue
-                txt = self.root.clipboard_get().strip()
-                if txt == self._clip_last or not txt:
-                    continue
-                self._clip_last = txt
-                if url_re.match(txt):
-                    # 主线程弹窗
-                    self.root.after(0, lambda t=txt: self._on_clip_url(t))
+                self.root.after(0, self._clipboard_poll)
             except Exception:
                 continue
+
+    def _clipboard_poll(self):
+        """主线程：读取剪贴板，发现新 URL 且未在下载列表中则弹新建下载。"""
+        import re
+        url_re = re.compile(r"^https?://", re.I)
+        try:
+            txt = self.root.clipboard_get().strip()
+        except Exception:
+            return
+        if not txt or txt == self._clip_last:
+            return
+        self._clip_last = txt
+        if not url_re.match(txt):
+            return
+        for s in self.mgr.snapshots():
+            if s.get("url") == txt and s.get("state") not in (dlcore.STATE_DONE, dlcore.STATE_CANCELLED, dlcore.STATE_ERROR):
+                return
+        self.new_download({"url": txt})
 
     def _on_clip_url(self, url: str):
         """剪贴板发现 URL，弹新建下载（自动填好链接）。"""
