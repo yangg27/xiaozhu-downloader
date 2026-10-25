@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v3.1.3
+小助下载器 · 核心引擎  dlcore.py   v3.1.4
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.3"
+ENGINE_VERSION = "3.1.8"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -61,7 +61,10 @@ DEFAULT_UA = (
 
 MEDIA_EXTS = (
     ".m3u8", ".mpd", ".mp4", ".webm", ".mkv", ".flv", ".mov", ".avi", ".ts",
-    ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg",
+    ".mp3", ".m4a", ".m4s", ".aac", ".flac", ".wav", ".ogg",
+    # v3.1.8 补 .m4s：B站 / YouTube 等站点的 DASH 音视频分离分片就用这个
+    # 后缀（代码里本来就有"B站 DASH 配对合并"逻辑，却因扩展名白名单缺
+    # .m4s，嗅探阶段根本收不到这些地址 —— 配对逻辑成了死代码）。
 )
 STREAM_EXTS = (".m3u8", ".mpd")
 ARCHIVE_EXTS = (".zip", ".rar", ".7z", ".tar", ".gz", ".xz", ".iso",
@@ -424,11 +427,13 @@ def human_size(n) -> str:
     n = float(n)
     if n < 1024:
         return f"{int(n)} B"
-    for unit in ("KB", "MB", "GB", "TB"):
+    # v3.1.8：补上 PB/EB —— 此前超 1024TB 仍按 TB 输出，会显示
+    # "4194304.0 TB" 这种不直观的数字（磁盘预检报错信息里就会出现）。
+    for unit in ("KB", "MB", "GB", "TB", "PB", "EB"):
         n /= 1024.0
-        if n < 1024.0 or unit == "TB":
+        if n < 1024.0 or unit == "EB":
             return f"{n:.1f} {unit}"
-    return f"{n:.1f} TB"
+    return f"{n:.1f} EB"
 
 
 def human_speed(bps) -> str:
@@ -487,6 +492,24 @@ _MIME_EXT = {
     "application/pdf": ".pdf", "application/x-7z-compressed": ".7z",
     "application/x-rar-compressed": ".rar", "application/vnd.rar": ".rar",
     "application/gzip": ".gz", "application/x-tar": ".tar",
+    # v3.1.8 补充：此前 .torrent 等常用类型缺失，导致从 MIME 推断扩展名
+    # 返回空串 —— 浏览器接管 / 剪贴板新建这类"靠 MIME 兜底"的场景下，
+    # 种子文件、安装包等会存成没有扩展名的文件。
+    "application/x-bittorrent": ".torrent",
+    "application/x-msdownload; charset": ".exe",
+    "application/octet-stream": "",          # 通用二进制：不猜，交给 URL 判断
+    "application/vnd.android.package-archive": ".apk",
+    "application/x-apple-diskimage": ".dmg",
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+    "image/webp": ".webp", "image/bmp": ".bmp", "image/svg+xml": ".svg",
+    "text/plain": ".txt", "text/html": ".html", "text/css": ".css",
+    "application/json": ".json", "application/xml": ".xml",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
 }
 
 
@@ -874,18 +897,28 @@ class RateLimiter:
         # 小限速下仍允许一次性预支一个完整数据块，避免永久阻塞。
         # 这相当于在低速时把实际突发提到 READ_SIZE，保证功能可用。
         burst = max(self._MIN_BURST, self.rate)
-        while True:
-            with self._lock:
-                t = now()
-                self._tokens = min(burst,
-                                   self._tokens + (t - self._ts) * self.rate)
-                self._ts = t
-                if self._tokens >= n:
-                    self._tokens -= n
-                    return
-                # 要满足 n，需要等的时间；rate=0 上面已返回，不会除零。
-                wait = (n - self._tokens) / float(self.rate)
-            time.sleep(min(max(wait, 0.005), 0.25))
+        # ★ v3.1.8 严重缺陷修复：单次请求量可能**大于** burst。
+        #   readinto(mv) 的 mv 是整个区块（最大 block_size=1MB），
+        #   BufferedReader.readinto 会一直读到填满，实测一次就返回 1MB。
+        #   而限速 500KB/s 时 burst = 500KB < 1MB —— tokens 被 min(burst, …)
+        #   压住，永远达不到 n，consume() 变成永久死循环，任务彻底卡死
+        #   （实测：4MB 文件卡在 1/4 区块、120 秒零进展、线程全部堵在 consume）。
+        #   修法：把 n 拆成不超过 burst 的片段依次获取，令牌账目仍然连续准确。
+        while n > 0:
+            take = min(n, burst)
+            while True:
+                with self._lock:
+                    t = now()
+                    self._tokens = min(burst,
+                                       self._tokens + (t - self._ts) * self.rate)
+                    self._ts = t
+                    if self._tokens >= take:
+                        self._tokens -= take
+                        break
+                    # 要满足 take，需要等的时间；rate=0 上面已返回，不会除零。
+                    wait = (take - self._tokens) / float(self.rate)
+                time.sleep(min(max(wait, 0.005), 0.25))
+            n -= take
 
 
 # --------------------------------------------------------------------------
@@ -1287,7 +1320,9 @@ class FileDownload(DownloadTask):
         self.block_size = BLOCK_SIZE
         self.range_ok = False
         self.single_mode = False
-        self.target = 1
+        # v3.1.8：初值改为 0 —— 排队中尚未分配线程时不应显示成"1 线程"。
+        # 真正开工时 _session() 会把它设为 fair/requested 值。
+        self.target = 0
         self._queue: list[int] = []
         self._qlock = threading.Lock()
         self._filelock = threading.Lock()
@@ -1609,6 +1644,8 @@ class FileDownload(DownloadTask):
             fair = self.mgr.fair_target_conns(self)
             if fair <= 0:
                 # 当前任务在并发槽位之外，先不启动工作线程，等待槽位释放
+                # v3.1.8：target 归 0，避免界面/快照把排队任务显示成"1 线程"
+                self.target = 0
                 self.state = STATE_WAIT
                 self.phase = "排队中（等待并发槽位）"
                 self.mgr.release_slot(self)
@@ -3202,6 +3239,31 @@ class Manager:
                         if t is None or t.state in (STATE_DONE, STATE_CANCELLED, STATE_ERROR, STATE_PAUSED):
                             self._slot_holders.discard(htid)
                 if len(self._slot_holders) < max_slots:
+                    # ★ v3.1.8 严重缺陷修复（实测：t1 完成后 t3 抢到槽位、
+                    #   先加入的 t2 反被饿死，直到 t3 跑完才轮到它）。
+                    #   原因：这里"有空位就直接占"的判断排在公平性检查之前 ——
+                    #   t1 一释放槽位，先醒来的那个（可能是最后加入的 t3）
+                    #   立刻占位，等待最久的 t2 只能继续干等。
+                    #   修法：有空位时也先看队列里是否有人比自己等得更久，
+                    #   有就让给对方（优先级/插队任务除外，它本来就该优先）。
+                    if not getattr(task, "_priority", False):
+                        self._slot_wait_start.setdefault(task.tid, time.time())
+                        waiting_others = {
+                            k: v for k, v in self._slot_wait_start.items()
+                            if k != task.tid and k in self.tasks}
+                        # 找出等得更久、且当前既没槽位也没在下载的任务
+                        senior = [
+                            k for k, v in waiting_others.items()
+                            if v < self._slot_wait_start[task.tid]
+                            and k not in self._slot_holders
+                            and self.tasks[k].state in (STATE_WAIT, STATE_PENDING)]
+                        if senior:
+                            # 让给等待更久的任务；若它已被唤醒并占位，则继续等
+                            if task.state == STATE_PAUSED:
+                                self._slot_wait_start.pop(task.tid, None)
+                                return False
+                            self._cv.wait(timeout=0.2)
+                            continue
                     self._slot_holders.add(task.tid)
                     task._slot_since = time.time()
                     self._slot_wait_start.pop(task.tid, None)
@@ -3211,6 +3273,48 @@ class Manager:
                     except Exception:
                         LOG.debug('忽略异常：_rebalance_targets()')
                     return True
+                # v3.1.8 修复：插队任务优先 —— 只要有空位就先给 _priority 任务，
+                # 不受"等待最久者优先"约束（否则普通任务会抢走插队任务的空位，
+                # 实测 jump_queue 后插队任务一直停在 waiting）。
+                if getattr(task, "_priority", False):
+                    holders_by_age = sorted(
+                        self._slot_holders,
+                        key=lambda k: getattr(self.tasks.get(k), '_slot_since', 0),
+                        reverse=True)
+                    for htid in holders_by_age:
+                        t = self.tasks.get(htid)
+                        if t and t.state not in (STATE_DOWNLOADING,):
+                            self._slot_holders.discard(htid)
+                            break
+                    if len(self._slot_holders) < max_slots:
+                        self._slot_holders.add(task.tid)
+                        task._slot_since = time.time()
+                        self._slot_wait_start.pop(task.tid, None)
+                        try:
+                            self._rebalance_targets()
+                        except Exception:
+                            LOG.debug('忽略异常：_rebalance_targets()')
+                        return True
+                else:
+                    # ★ v3.1.8 严重缺陷修复（实测插队成功率仅 3/6）：
+                    #   普通任务在下面"等待最久者优先"逻辑里会抢先占位 ——
+                    #   jump_queue 刚把别人挤掉腾出空位，等待更久的普通任务
+                    #   立刻补上，插队任务下一轮又落到队尾，永远抢不到，
+                    #   最终停在 waiting 且目标线程为 0（等于插队无效）。
+                    #   这里先检查是否有 _priority 任务在等：有则本次让路，
+                    #   只在没有插队任务时才走普通公平调度。
+                    _waiting_prio = [
+                        t for t in self.tasks.values()
+                        if getattr(t, "_priority", False)
+                        and t.tid != task.tid
+                        and t.state in (STATE_WAIT, STATE_PENDING)]
+                    if _waiting_prio:
+                        self._slot_wait_start.setdefault(task.tid, time.time())
+                        if task.state == STATE_PAUSED:
+                            self._slot_wait_start.pop(task.tid, None)
+                            return False
+                        self._cv.wait(timeout=0.2)
+                        continue
                 # 公平调度：等待最久的任务优先获得槽位（避免后加任务饿死）
                 now_t = time.time()
                 self._slot_wait_start.setdefault(task.tid, now_t)
@@ -3268,7 +3372,8 @@ class Manager:
                  headers: dict | None = None, kind: str = "auto",
                  speed_limit: int | None = None, group: str = "",
                  start: bool = True, extra: dict | None = None,
-                 priority: bool = False) -> DownloadTask:
+                 priority: bool = False, tid: str = "",
+                 dedupe: bool = True) -> DownloadTask:
         conns = int(conns if conns is not None else self.cfg.get("connections", 16))
         speed_limit = int(speed_limit if speed_limit is not None else self.cfg.get("speed_limit", 0))
         out_dir = os.path.abspath(out_dir or self.cfg.get("download_dir"))
@@ -3288,16 +3393,23 @@ class Manager:
             else:
                 cls = FileDownload
         # 同名任务去重（同一 URL 未完成时直接复用）
-        with self._lock:
-            for tid in self.order:
-                t = self.tasks.get(tid)
-                if t and t.url == url and t.state not in (STATE_DONE, STATE_CANCELLED, STATE_ERROR):
-                    return t
+        # v3.1.8：load_jobs 恢复存档时必须关闭去重 —— 用户可能同时挂了
+        # 多个同 URL 任务（换目录/换文件名），去重会把它们错误合并成一条，
+        # 重启后任务数量凭空变少。
+        if dedupe:
+            with self._lock:
+                for _existing_tid in self.order:
+                    t = self.tasks.get(_existing_tid)
+                    if t and t.url == url and t.state not in (STATE_DONE, STATE_CANCELLED, STATE_ERROR):
+                        return t
+        # v3.1.8 修复：把 tid 显式传给构造函数。
+        # 此前 load_jobs() 只能事后改 task.tid 并搬字典，一旦中途有别的代码
+        # 用新 tid 建过 .xzd 目录就会错位。构造时定好 tid，续传目录必然对齐。
         task = cls(self, url, out_dir, filename, conns=conns,
                    referer=referer, cookie=cookie, headers=headers,
                    speed_limit=speed_limit, kind=k, group=group,
                    insecure=bool(self.cfg.get("insecure")),
-                   proxy=self.cfg.get("proxy", ""))
+                   proxy=self.cfg.get("proxy", ""), tid=tid)
         task.extra = extra or {}
         task._priority = bool(priority)
         with self._lock:
@@ -3310,6 +3422,15 @@ class Manager:
         t = threading.Thread(target=task.run, daemon=True, name=f"xzd-{task.tid}")
         task._run_thread = t
         t.start()
+        # v3.1.8 修复：priority=True 此前只设了 _priority 标志，从不触发抢占
+        # —— _evict_youngest_for_priority 只在 jump_queue() 里被调用。
+        # 结果：add_task(priority=True) 的任务会一直排队，抢不到槽位。
+        # 现在显式挤掉一个正在下载的任务，让插队任务立刻进去。
+        if priority:
+            try:
+                self._evict_youngest_for_priority(task)
+            except Exception:
+                LOG.debug("忽略异常：add_task priority 抢占")
         if not start:
             task.pause()
         self.save_jobs()
@@ -3364,6 +3485,20 @@ class Manager:
             victim.pause()
             self._slot_holders.discard(victim.tid)
             LOG.info("插队任务 %s 挤掉任务 %s，后者已暂停", priority_task.tid, victim.tid)
+            # ★ v3.1.8 严重缺陷修复（实测插队成功率仅 3/6，时好时坏）：
+            #   只挤掉 victim 是**不够**的。victim 退出时 release_slot() 会
+            #   notify_all() 唤醒所有排队者，而"等待最久优先"的普通任务
+            #   （例如比插队任务更早加入的那个）会先一步抢到这个空位，
+            #   插队任务下一轮又落回队尾 —— 永远停在 waiting、目标线程 0，
+            #   表现就是"点了插队但根本没插进去"。
+            #   修法：在同一个 _cv 临界区内直接把空位预占给插队任务，
+            #   从根上堵死普通任务抢位的路径。
+            if (priority_task.state in (STATE_WAIT, STATE_PENDING)
+                    and priority_task.tid not in self._slot_holders):
+                self._slot_holders.add(priority_task.tid)
+                priority_task._slot_since = time.time()
+                self._slot_wait_start.pop(priority_task.tid, None)
+                priority_task._wake.set()
         # 释放槽位后触发重平衡
         try:
             self._rebalance_targets()
@@ -3383,6 +3518,12 @@ class Manager:
           · 第 4 个及以后：排队，目标线程数 = 0（不占用带宽）
           · 当某个任务完成退出，剩余任务按上述链式重新计算并递补
         """
+        base = int(self.cfg.get("connections", 24))
+
+        # 插队任务默认满速：直接给 requested_conns，不受槽位和 80% 链式递减限制
+        if getattr(task, "_priority", False):
+            return min(task.requested_conns, base)
+
         max_slots = max(1, min(8, int(self.cfg.get("max_parallel_tasks", 3))))
         with self._lock:
             # 只统计真正在争用带宽的任务
@@ -3403,14 +3544,10 @@ class Manager:
             return 0
 
         # 链式 80% 递减：从第 1 个满速任务开始，逐级 ×0.8
-        base = int(self.cfg.get("connections", 24))
         fair = base
         for _ in range(idx):
             fair = max(4, int(fair * 0.8))
 
-        # 插队任务默认满速：直接给 requested_conns，不再受 80% 链式递减限制
-        if getattr(task, "_priority", False):
-            return min(task.requested_conns, base)
         return min(task.requested_conns, fair)
 
     def _rebalance_targets(self):
@@ -3438,6 +3575,20 @@ class Manager:
             if tid in self.order:
                 self.order.remove(tid)
         if t and delete_files:
+            # ★ v3.1.8 修复：必须先停掉下载线程再删目录。
+            #   此前直接 rmtree，而任务线程还在跑 —— 它会立刻
+            #   ensure_dir(self.tmp_dir) 把目录**重建**出来，用户看到
+            #   "任务删了但 .xzd 残留"（实测复现：临时目录未清理）。
+            t._stop = True
+            try:
+                t._wake.set()
+            except Exception:
+                LOG.debug('忽略异常：t._wake.set()')
+            th = getattr(t, "_run_thread", None)
+            if th is not None and th.is_alive():
+                th.join(timeout=3.0)
+            # 线程退出后仍可能有最后一次落盘，删两遍确保干净
+            shutil.rmtree(t.tmp_dir, ignore_errors=True)
             shutil.rmtree(t.tmp_dir, ignore_errors=True)
         self.release_slot(t) if t else None
         self.save_jobs()
@@ -3601,11 +3752,19 @@ class Manager:
             try:
                 if it.get("state") in (STATE_DONE, STATE_CANCELLED):
                     continue
+                # ★ v3.1.8 严重缺陷修复：必须沿用存档里的 tid。
+                #   断点数据存放在 out_dir/.xzd/<tid>/（meta.json + bitmap.bin
+                #   + data.bin）。此前 add_task 无视存档 tid 自己生成一个新的，
+                #   恢复出的任务指向空目录，_load_state() 必然失败 ——
+                #   用户重启后已下载的部分全部作废、从零重下。
+                #   现在 tid 直接进构造函数，续传目录天然对齐，不再需要
+                #   "先建成再改名 + 搬字典" 那套易错的事后补丁。
                 task = self.add_task(
                     it["url"], out_dir=it.get("out_dir"), filename=it.get("filename", ""),
                     conns=it.get("conns"), referer=it.get("referer", ""),
                     kind=it.get("kind", "auto"), speed_limit=it.get("speed_limit"),
-                    start=False)
+                    group=it.get("group", ""), tid=it.get("tid") or "",
+                    start=False, dedupe=False)
                 n += 1
             except Exception:
                 continue
@@ -3650,7 +3809,7 @@ class Manager:
 # --------------------------------------------------------------------------
 
 _MEDIA_URL_RE = re.compile(
-    r"""(?:https?:)?//[^\s"'<>\\]+?\.(?:m3u8|mp4|webm|mkv|flv|mov|ts|mpd|mp3|m4a|aac|flac|wav|ogg)(?:\?[^\s"'<>\\]*)?""",
+    r"""(?:https?:)?//[^\s"'<>\\]+?\.(?:m3u8|mp4|webm|mkv|flv|mov|ts|mpd|mp3|m4a|m4s|aac|flac|wav|ogg)(?:\?[^\s"'<>\\]*)?""",
     re.I)
 _TAG_SRC_RE = re.compile(
     r"""<(?:video|audio|source|embed|iframe)\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.I)

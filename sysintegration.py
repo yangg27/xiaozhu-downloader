@@ -188,7 +188,7 @@ def register_protocol() -> tuple[bool, str]:
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                                 PROTOCOL_KEY + r"\DefaultIcon", 0,
                                 winreg.KEY_SET_VALUE) as k:
-            ico = os.path.join(base_dir(), "tray.ico")
+            ico = os.path.join(base_dir(), "_internal", "tray.ico")
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, ico if os.path.exists(ico) else exe)
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                                 PROTOCOL_KEY + r"\shell\open\command", 0,

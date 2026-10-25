@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -67,33 +68,38 @@ def run():
 
     # 把用户可见资源复制到 exe 同级
     app_dir = DIST
-    for name in ("browser-extension", "使用说明.md", "tray.ico"):
-        src = os.path.join(ROOT, name)
+    for name, src_name in (
+        ("使用说明.md", "使用说明.md"),
+    ):
+        src = os.path.join(ROOT, src_name)
         dst = os.path.join(app_dir, name)
         if os.path.exists(src):
-            if os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            else:
-                shutil.copy2(src, dst)
+            shutil.copy2(src, dst)
             print(f"[build_app] 已复制: {name}")
 
-    # v3.0.8: 把 browser-extension 打包为 zip / crx，方便用户解压安装
-    ext_src = os.path.join(ROOT, "browser-extension")
+    # tray.ico 由 PyInstaller datas 直接打包到 _internal/，不再复制到 exe 同级
+
+    # 把浏览器扩展源码打包为 .crx，只保留 crx 产物
+    ext_src = os.path.join(ROOT, "_assets", "browser-extension")
     if os.path.isdir(ext_src):
-        ext_zip = os.path.join(app_dir, "browser-extension.zip")
         ext_crx = os.path.join(app_dir, "browser-extension.crx")
-        with zipfile.ZipFile(ext_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        ext_tmp = os.path.join(tempfile.gettempdir(), "browser-extension.zip")
+        with zipfile.ZipFile(ext_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, _, files in os.walk(ext_src):
                 for fn in files:
                     full = os.path.join(root, fn)
                     arc = os.path.relpath(full, ext_src)
                     zf.write(full, arc)
-        shutil.copy2(ext_zip, ext_crx)
-        print("[build_app] 已打包 browser-extension.zip / .crx")
+        shutil.copy2(ext_tmp, ext_crx)
+        try:
+            os.remove(ext_tmp)
+        except Exception:
+            pass
+        print("[build_app] 已打包 browser-extension.crx")
 
-    # v3.0.8: 生成带箭头标注的扩展安装指引图
+    # 生成带箭头标注的扩展安装指引图
     guide_script = os.path.join(ROOT, "_t", "gen_extension_guide.py")
-    guide_out = os.path.join(app_dir, "extension-install-guide.png")
+    guide_out = os.path.join(app_dir, "浏览器扩展安装指引.png")
     if os.path.exists(guide_script):
         rc = subprocess.run([py, guide_script, guide_out]).returncode
         if rc == 0:

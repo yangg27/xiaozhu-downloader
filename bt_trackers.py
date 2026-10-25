@@ -14,6 +14,7 @@ bt_trackers.py · 小助下载管理器 XZDM · BT Trackers 自动更新器
 from __future__ import annotations
 
 import os
+import re
 import socket
 import ssl
 import sys
@@ -97,14 +98,38 @@ def meta_path() -> str:
 # ---------------------------------------------------------------------------
 # 解析 / 拉取
 # ---------------------------------------------------------------------------
+_TRACKER_SCHEMES = ("udp://", "http://", "https://", "ws://", "wss://")
+
+# v3.1.8：一个订阅源至少给出这么多条才算"可用"，
+# 低于此数一律当作没拉到（防止 HTML 页面/半截响应污染列表）。
+MIN_VIABLE_TRACKERS = 5
+
+# v3.1.8 修复：只接受真正的 tracker URL。
+# 事故背景：订阅源 cf.trackerslist.com 有时会返回一个 **HTML 页面**
+# （CDN 拦了直连、或返回了站点首页），而旧 parse_trackers 只按行切分、
+# 不做任何校验，于是 <html> <script> 等整页源码全被当成 tracker 存进缓存。
+# 实测污染后 153 条里 130+ 条是网页源码，BT 任务拿着这些垃圾去 announce，
+# 既浪费建连时间也让 tracker 列表彻底失效。
+_TRACKER_URL_RE = re.compile(
+    r"^(?:udp|http|https|ws|wss)://[^\s<>\"'\\]+$", re.I)
+
+
 def parse_trackers(text: str) -> list[str]:
-    """从 best.txt 内容解析 tracker 列表。每行一条，空行分隔段落。"""
+    """从 best.txt 内容解析 tracker 列表。
+
+    只保留形如 <scheme>://<host>[:port][/path] 的合法 tracker URL：
+      · 丢弃 HTML/JS/CSS 等非 URL 行（订阅源返回网页时的自我保护）
+      · 丢弃带空格、引号、尖括号等 URL 非法字符的行
+      · 去重且保持原顺序
+    """
     out: list[str] = []
     seen = set()
     for raw in (text or "").splitlines():
-        line = raw.strip()
+        line = raw.strip().lstrip("\ufeff")          # 去 BOM
         if not line or line.startswith("#"):
             continue
+        if not _TRACKER_URL_RE.match(line):
+            continue                                  # ← v3.1.8：非法项直接丢弃
         if line not in seen:
             seen.add(line)
             out.append(line)
@@ -194,7 +219,10 @@ def fetch_trackers(sources: list[str] | None = None,
         try:
             body = fetch_one(url, timeout=timeout)
             lst = parse_trackers(body)
-            if not lst:
+            # v3.1.8：低于 MIN_VIABLE 视为"该源没给出可用列表"而跳过。
+            # 配合 parse_trackers 的 URL 校验，双保险拦住 HTML 页面污染：
+            # 就算页面里正好含 1-2 个 tracker 链接，也不会拿它当成功源。
+            if len(lst) < MIN_VIABLE_TRACKERS:
                 continue
             if not first_source:
                 first_source = url

@@ -1,0 +1,125 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 11870)
+Traceback (most recent call last):
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\http\server.py", line 449, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\http\server.py", line 415, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\Sunny_yang\.workbuddy\binaries\python\versions\3.13.12\Lib\socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+----------------------------------------
+==============================================================================
+小助下载器 全功能实测  v3.1.8
+Python 3.13.14 | 用例 46 个
+==============================================================================
+  [PASS] A 多线程分片 · A1_真分片下载_32线程_16MB_完整性  (1.77s)  Range 请求 16 次 / 全量 0 次；实测目标线程峰值 32（采样 12 次）；16777216 字节耗时 0.76s（21.0 MB/s）
+  [PASS] A 多线程分片 · A2_区块对齐_恰好1MB边界  (0.46s)  nblocks=4, 大小精确匹配 3670016 字节
+  [PASS] A 多线程分片 · A3_小文件走单流_小于1MB  (0.24s)  小文件 307200 字节，走单流成功（single_mode=True）
+  [PASS] A 多线程分片 · A4_服务器不支持Range_单流兜底  (0.59s)  无 Range 服务器 → 正确降级单流，6291456 字节校验通过
+  [PASS] A 多线程分片 · A5_服务器忽略Range_返回200_不写错位  (0.77s)  忽略 Range 的服务器 → 内容未错位（5242880 字节）
+  [PASS] B 速度均衡 · B1_80%链式递减_3任务实测线程数  (10.50s)  3 任务目标线程 [24, 19, 15]（期望 [24, 19, 15]），第 4 个排队目标 0；状态 ['downloading', 'downloading', 'downloading', 'waiting']
+  [PASS] B 速度均衡 · B2_排队任务不占带宽_完成后递补  (11.46s)  排队中：目标线程 [0, 0]、已下 [0, 0] 字节（不占带宽）；t1 完成后**先加入的 t2** 递补 8 线程，t3 仍排队
+  [PASS] B 速度均衡 · B3_完成释放槽位_自动递补提速  (8.10s)  t2 排队时目标 24 线程 → t1 完成后升至 24 线程
+  [PASS] C 插队 · C1_插队抢占_被挤任务暂停  (8.62s)  t1 被挤暂停（'已暂停（被插队任务挤掉）'）；插队任务立即 downloading、满速 24 线程
+  [PASS] C 插队 · C2_jump_queue API_置顶并抢占  (8.09s)  jump_queue=True, order[0]==t3:True, t3._priority=True, t3状态=downloading/24线程, t1状态=paused, t1相位='已暂停（被插队任务挤掉）'
+  [PASS] D 断点续传 · D1_暂停再恢复_续传不重下  (18.22s)  暂停时进度 15%（3.0 MB），恢复后仅补传 55%，内容完整
+  [PASS] D 断点续传 · D2_连接中断_自动重试成功  (0.74s)  首块被强制断开后自动重试成功，SHA256 校验通过
+  [PASS] D 断点续传 · D3_重启进程_从磁盘恢复任务  (7.25s)  重启后恢复 1 个任务（jobs.json 1 条），tid=ce5f0d8ca1e8 复用，磁盘断点 1.0 MB → 1.0 MB
+  [PASS] E 限速 · E1_限速500KBps_实际吞吐接近  (7.38s)  限速 500 KB/s，4.0 MB 数据耗时 7.02s（理论 8.19s，偏差 -14%）
+  [PASS] E 限速 · E2_运行中改限速_立即生效  (1.79s)  limiter.rate 由 1.0 MB/s 实时改为 3.0 MB/s（1MB/s → 3MB/s）
+  [PASS] E 限速 · E3_低速限速不死锁_单次请求大于burst  (7.08s)  限速 500KB/s（<区块 1MB）4.0 MB 数据 6.7s 完成，无死锁，内容校验通过
+  [PASS] E 限速 · E4_极低速限速不死锁_限速小于单次读取  (0.24s)  限速 64.0 KB/s（低于 burst 下限 256KB）完成，耗时 0.1s
+  [PASS] F 限流退避 · F1_429后自动重试成功  (22.26s)  前 4 次请求 429 → 退避后成功，总耗时 22.1s，内容校验通过
+  [PASS] G HLS · G1_m3u8分片下载合并_无加密  (0.54s)  6 个分片合并为 1.4 MB，字节完全一致
+  [PASS] G HLS · G2_AES-128加密分片_解密正确  (17.85s)  AES-128 解密正确（3 分片，196608 字节，纯 Python 通路）
+  [PASS] G HLS · G3_多码率自适应_选最高清晰度  (0.45s)  master.m3u8 正确选择 1.8Mbps 变体（98304 字节）
+  [PASS] H 解析工具 · H1_Content-Disposition_文件名与扩展名  (0.24s)  Content-Disposition(RFC5987) → '报告 v2.pdf'，内容校验通过
+  [PASS] H 解析工具 · H2_工具函数集合  (0.02s)  human_size(1536)=1.5 KB; human_speed(1048576)=1.0 MB/s; human_eta(3661)=1时1分; safe_filename='a_b_c_d_e_f_g_h_i_j'; disposition ok; kind_of_url ok; guess_ext ok; unique_path='f(1).txt'; dirs ok; ssl ctx 单例 ok
+  [PASS] H 解析工具 · H3_纯AES解密_官方向量核对  (5.43s)  纯 Python AES-CBC 通过官方向量：FIPS-197 C.1 单块 OK；SP 800-38A F.2.1 CBC 4块 OK；64KB 往返 OK；IV 生效性 OK
+  [PASS] I HttpHelper · I1_headers_组装与优先级  (0.00s)  UA/Referer/Cookie/extra 覆盖顺序正确
+  [PASS] I HttpHelper · I2_get_text_get_bytes_连接池  (0.09s)  get_text/get_bytes/conn_get/conn_release/pool_close_all 全部可用
+  [PASS] I HttpHelper · I3_代理时降级urllib_不崩  (2.61s)  代理模式下正确禁用连接池，坏代理抛错：URLError
+  [PASS] J Manager · J1_配置读写_原子落盘  (0.20s)  配置往返正确，损坏配置自动备份 .bad
+  [PASS] J Manager · J2_pause_all_resume_all  (4.16s)  pause_all 全部暂停 ['paused', 'paused']；resume_all 恢复 2 个 → ['done', 'done']（返回值 None）
+  [PASS] J Manager · J3_历史记录与快照字段  (0.33s)  历史 1 条（含 url/filename/size），快照字段齐全，total_speed=0 B/s
+  [PASS] J Manager · J4_嗅探入库_去重_清空  (0.01s)  3 条（含 1 条重复）→ 入库 2 条；二次入库 0 条；清空正常
+  [PASS] J Manager · J5_磁盘空间预检  (0.15s)  4EB 触发预检报错：磁盘空间不足：需要约 4.0 EB，可用仅 59.1 GB（C:\Users\Sunny_yang\AppData\Local\Temp\x
+  [PASS] J Manager · J6_任务移除与文件清理  (6.74s)  任务已移除，临时目录已删（此前存在=False）
+  [PASS] K localserver · K1_全部GET路由  (3.49s)  ping/status/history/sniff/scan/help/wake/404/OPTIONS 全通过，token 鉴权生效
+  [PASS] K localserver · K2_POST_add_batch_sniff_open  (3.92s)  /add(+out_dir透传+非法URL) /batch /sniff /open(file=True/folder无NameError/404) 全通过
+  [PASS] K localserver · K3_端口占用自动顺延  (0.86s)  18803 被占时自动顺延到 18804（+1），接口可用
+  [PASS] K localserver · K4_CORS与Origin校验  (0.97s)  恶意 Origin 403；chrome-extension 放行并可获取 token
+  [PASS] L 嗅探 · L1_网页媒体扫描_识别mp4/m3u8  (0.06s)  标题='测试页'，识别 3 项（纯媒体，zip/pdf/jpg 正确排除），类型 ['hls', 'media']，hls 优先
+  [PASS] L 嗅探 · L2_相对路径补全与去重  (1.17s)  相对路径补全为绝对地址，去重后 3 项
+  [PASS] L 嗅探 · L3_HLS播放列表解析_识别为流  (0.14s)  m3u8 页面识别为流，items=1
+  [PASS] M 引擎 · M1_engine=aria2_配置生效  (0.37s)  Aria2FileDownload 通道实测成功（2.0 MB），内容校验通过
+  [PASS] M 引擎 · M2_retry_with_aria2_备用切换  (0.36s)  失败任务通过 retry_with_aria2 成功恢复
+  [PASS] M 引擎 · M3_aria2c_HLS通道  (0.37s)  N_m3u8DL-RE HLS 通道成功（384.0 KB）
+  [PASS] N 种子 · N1_magnet_URI解析  (0.05s)  info_hash/name/2个tracker 解析正确
+  [PASS] N 种子 · N2_BT输入规范化_分派  (0.00s)  is_magnet/is_torrent_url/is_torrent_path(存在性+后缀)/recommend_protocols 判断正确
+  [PASS] N 种子 · N3_tracker列表与过滤  (0.00s)  兜底 20 条；解析去重正确；离线可取 122 条（source=cache<https://cf.trackerslist.com/best.txt>）
+
+==============================================================================
+结果：46/46 通过   耗时 166.1s
+==============================================================================
+
+关键实测数据：
+  · A 多线程分片/A1_真分片下载_32线程_16MB_完整性: Range 请求 16 次 / 全量 0 次；实测目标线程峰值 32（采样 12 次）；16777216 字节耗时 0.76s（21.0 MB/s）
+  · A 多线程分片/A2_区块对齐_恰好1MB边界: nblocks=4, 大小精确匹配 3670016 字节
+  · A 多线程分片/A3_小文件走单流_小于1MB: 小文件 307200 字节，走单流成功（single_mode=True）
+  · A 多线程分片/A4_服务器不支持Range_单流兜底: 无 Range 服务器 → 正确降级单流，6291456 字节校验通过
+  · A 多线程分片/A5_服务器忽略Range_返回200_不写错位: 忽略 Range 的服务器 → 内容未错位（5242880 字节）
+  · B 速度均衡/B1_80%链式递减_3任务实测线程数: 3 任务目标线程 [24, 19, 15]（期望 [24, 19, 15]），第 4 个排队目标 0；状态 ['downloading', 'downloading', 'downloading', 'waiting']
+  · B 速度均衡/B2_排队任务不占带宽_完成后递补: 排队中：目标线程 [0, 0]、已下 [0, 0] 字节（不占带宽）；t1 完成后**先加入的 t2** 递补 8 线程，t3 仍排队
+  · B 速度均衡/B3_完成释放槽位_自动递补提速: t2 排队时目标 24 线程 → t1 完成后升至 24 线程
+  · C 插队/C1_插队抢占_被挤任务暂停: t1 被挤暂停（'已暂停（被插队任务挤掉）'）；插队任务立即 downloading、满速 24 线程
+  · C 插队/C2_jump_queue API_置顶并抢占: jump_queue=True, order[0]==t3:True, t3._priority=True, t3状态=downloading/24线程, t1状态=paused, t1相位='已暂停（被插队任务挤掉）'
+  · D 断点续传/D1_暂停再恢复_续传不重下: 暂停时进度 15%（3.0 MB），恢复后仅补传 55%，内容完整
+  · D 断点续传/D2_连接中断_自动重试成功: 首块被强制断开后自动重试成功，SHA256 校验通过
+  · D 断点续传/D3_重启进程_从磁盘恢复任务: 重启后恢复 1 个任务（jobs.json 1 条），tid=ce5f0d8ca1e8 复用，磁盘断点 1.0 MB → 1.0 MB
+  · E 限速/E1_限速500KBps_实际吞吐接近: 限速 500 KB/s，4.0 MB 数据耗时 7.02s（理论 8.19s，偏差 -14%）
+  · E 限速/E2_运行中改限速_立即生效: limiter.rate 由 1.0 MB/s 实时改为 3.0 MB/s（1MB/s → 3MB/s）
+  · E 限速/E3_低速限速不死锁_单次请求大于burst: 限速 500KB/s（<区块 1MB）4.0 MB 数据 6.7s 完成，无死锁，内容校验通过
+  · E 限速/E4_极低速限速不死锁_限速小于单次读取: 限速 64.0 KB/s（低于 burst 下限 256KB）完成，耗时 0.1s
+  · F 限流退避/F1_429后自动重试成功: 前 4 次请求 429 → 退避后成功，总耗时 22.1s，内容校验通过
+  · G HLS/G1_m3u8分片下载合并_无加密: 6 个分片合并为 1.4 MB，字节完全一致
+  · G HLS/G2_AES-128加密分片_解密正确: AES-128 解密正确（3 分片，196608 字节，纯 Python 通路）
+  · G HLS/G3_多码率自适应_选最高清晰度: master.m3u8 正确选择 1.8Mbps 变体（98304 字节）
+  · H 解析工具/H1_Content-Disposition_文件名与扩展名: Content-Disposition(RFC5987) → '报告 v2.pdf'，内容校验通过
+  · H 解析工具/H2_工具函数集合: human_size(1536)=1.5 KB; human_speed(1048576)=1.0 MB/s; human_eta(3661)=1时1分; safe_filename='a_b_c_d_e_f_g_h_i_j'; disposition ok; kind_of_url ok; guess_ext ok; unique_path='f(1).txt'; dirs ok; ssl ctx 单例 ok
+  · H 解析工具/H3_纯AES解密_官方向量核对: 纯 Python AES-CBC 通过官方向量：FIPS-197 C.1 单块 OK；SP 800-38A F.2.1 CBC 4块 OK；64KB 往返 OK；IV 生效性 OK
+  · I HttpHelper/I1_headers_组装与优先级: UA/Referer/Cookie/extra 覆盖顺序正确
+  · I HttpHelper/I2_get_text_get_bytes_连接池: get_text/get_bytes/conn_get/conn_release/pool_close_all 全部可用
+  · I HttpHelper/I3_代理时降级urllib_不崩: 代理模式下正确禁用连接池，坏代理抛错：URLError
+  · J Manager/J1_配置读写_原子落盘: 配置往返正确，损坏配置自动备份 .bad
+  · J Manager/J2_pause_all_resume_all: pause_all 全部暂停 ['paused', 'paused']；resume_all 恢复 2 个 → ['done', 'done']（返回值 None）
+  · J Manager/J3_历史记录与快照字段: 历史 1 条（含 url/filename/size），快照字段齐全，total_speed=0 B/s
+  · J Manager/J4_嗅探入库_去重_清空: 3 条（含 1 条重复）→ 入库 2 条；二次入库 0 条；清空正常
+  · J Manager/J5_磁盘空间预检: 4EB 触发预检报错：磁盘空间不足：需要约 4.0 EB，可用仅 59.1 GB（C:\Users\Sunny_yang\AppData\Local\Temp\x
+  · J Manager/J6_任务移除与文件清理: 任务已移除，临时目录已删（此前存在=False）
+  · K localserver/K1_全部GET路由: ping/status/history/sniff/scan/help/wake/404/OPTIONS 全通过，token 鉴权生效
+  · K localserver/K2_POST_add_batch_sniff_open: /add(+out_dir透传+非法URL) /batch /sniff /open(file=True/folder无NameError/404) 全通过
+  · K localserver/K3_端口占用自动顺延: 18803 被占时自动顺延到 18804（+1），接口可用
+  · K localserver/K4_CORS与Origin校验: 恶意 Origin 403；chrome-extension 放行并可获取 token
+  · L 嗅探/L1_网页媒体扫描_识别mp4/m3u8: 标题='测试页'，识别 3 项（纯媒体，zip/pdf/jpg 正确排除），类型 ['hls', 'media']，hls 优先
+  · L 嗅探/L2_相对路径补全与去重: 相对路径补全为绝对地址，去重后 3 项
+  · L 嗅探/L3_HLS播放列表解析_识别为流: m3u8 页面识别为流，items=1
+  · M 引擎/M1_engine=aria2_配置生效: Aria2FileDownload 通道实测成功（2.0 MB），内容校验通过
+  · M 引擎/M2_retry_with_aria2_备用切换: 失败任务通过 retry_with_aria2 成功恢复
+  · M 引擎/M3_aria2c_HLS通道: N_m3u8DL-RE HLS 通道成功（384.0 KB）
+  · N 种子/N1_magnet_URI解析: info_hash/name/2个tracker 解析正确
+  · N 种子/N2_BT输入规范化_分派: is_magnet/is_torrent_url/is_torrent_path(存在性+后缀)/recommend_protocols 判断正确
+  · N 种子/N3_tracker列表与过滤: 兜底 20 条；解析去重正确；离线可取 122 条（source=cache<https://cf.trackerslist.com/best.txt>）

@@ -41,7 +41,7 @@ def draw_guide(out_path: str):
     steps = [
         ("1", "打开扩展管理页", "Chrome 地址栏输入 chrome://extensions，Edge 输入 edge://extensions"),
         ("2", "开启「开发者模式」", "点击右上角开关，打开开发者模式"),
-        ("3", "解压 browser-extension.crx", "把安装目录下的 .crx 文件改后缀为 .zip 并解压"),
+        ("3", "解压扩展文件", "把 browser-extension.crx 改后缀为 .zip 并解压"),
         ("4", "加载已解压的扩展", '点击「加载已解压的扩展程序」，选择解压后的 browser-extension 文件夹'),
     ]
 
@@ -73,5 +73,5 @@ def draw_guide(out_path: str):
 
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else "extension-install-guide.png"
+    out = sys.argv[1] if len(sys.argv) > 1 else "浏览器扩展安装指引.png"
     draw_guide(out)

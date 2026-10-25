@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import secrets
+import subprocess
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +38,7 @@ MAX_BODY = 2 * 1024 * 1024
 
 class LocalAPI:
     def __init__(self, mgr: dlcore.Manager, port: int = 8763, token: str = "",
-                 on_wake=None):
+                 on_wake=None, on_help=None):
         self.mgr = mgr
         self.port = int(port)
         self.token = token or secrets.token_hex(16)
@@ -47,6 +48,8 @@ class LocalAPI:
         # 协议唤起回调：接收 xzd:// 链接，交给 GUI 主线程处理
         # （单实例保护的关键——已在运行时由本回调接管，不再启动新进程）
         self.on_wake = on_wake
+        # 帮助页面回调：安装器或扩展请求打开主窗口并显示帮助
+        self.on_help = on_help
 
     # ---- 令牌 ----
     @property
@@ -185,6 +188,16 @@ class LocalAPI:
                                            "error": f"{type(e).__name__}: {e}"}, 500)
                 if path == "/":
                     return self._json({"ok": True, "app": dlcore.APP_NAME})
+                if path == "/help":
+                    # 打开主窗口并显示帮助页；本机调用，无需令牌
+                    if api.on_help is None:
+                        return self._json({"ok": False, "error": "不支持帮助页"}, 501)
+                    try:
+                        api.on_help()
+                        return self._json({"ok": True})
+                    except Exception as e:  # noqa
+                        return self._json({"ok": False,
+                                           "error": f"{type(e).__name__}: {e}"}, 500)
                 if path == "/wake":
                     # 协议唤起：把 xzd:// 链接转给已运行的实例处理（单实例保护）
                     # 本机进程无 Origin，浏览器直接访问会带 http Origin —— 都放行，
@@ -230,6 +243,7 @@ class LocalAPI:
                     try:
                         t = api.mgr.add_task(
                             url,
+                            out_dir=(item.get("out_dir") or "").strip() or None,
                             filename=(item.get("filename") or "").strip(),
                             referer=referer,
                             cookie=(item.get("cookie") or ""),

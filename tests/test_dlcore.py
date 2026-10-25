@@ -290,5 +290,76 @@ class TestBitmap(unittest.TestCase):
             self.assertEqual(loaded["size"], t.size)
 
 
+class TestV318Regression(unittest.TestCase):
+    """v3.1.8 全功能实测中定位到的缺陷，逐条固化为回归用例。
+
+    每一条都对应一次真实故障（详见 TEST_REPORT_v3.1.8.md），
+    目的是防止后续改动无意间把它们改回去。
+    """
+
+    def test_rate_limiter_no_deadlock(self):
+        """限速小于单次请求量时不得死锁（实测曾卡死 120 秒）。"""
+        rl = dlcore.RateLimiter(256 * 1024)      # 256KB/s
+        t0 = time.time()
+        rl.consume(1024 * 1024)                  # 单次要 1MB > burst
+        el = time.time() - t0
+        self.assertLess(el, 10.0, "限速器疑似死锁：%.1fs" % el)
+
+    def test_human_size_extended_units(self):
+        """超过 TB 应进位到 PB/EB，不能显示 4194304.0 TB。"""
+        self.assertIn("PB", dlcore.human_size(5 * 1024 ** 5))
+        self.assertIn("EB", dlcore.human_size(4 * 1024 ** 6))
+        self.assertNotIn("TB", dlcore.human_size(1 << 62))
+
+    def test_mime_torrent(self):
+        """application/x-bittorrent 必须能推出 .torrent（曾返回空串）。"""
+        self.assertEqual(dlcore.guess_ext_from_mime("application/x-bittorrent"),
+                         ".torrent")
+        self.assertEqual(dlcore.guess_ext_from_mime("video/mp4"), ".mp4")
+
+    def test_m4s_is_media(self):
+        """.m4s（B站/YouTube DASH 分片）必须被识别为媒体（曾漏在白名单外）。"""
+        self.assertIn(".m4s", dlcore.MEDIA_EXTS)
+        html = ('<html><body><script>var v = '
+                '"https://x.com/up/123_u1-1-100001.m4s";</script></body></html>')
+        srv = None
+        try:
+            from tests.range_server import RangeServer
+            srv = RangeServer({"/p.html": (html.encode(),
+                                           {"Content-Type": "text/html"})}).start()
+            r = dlcore.scan_webpage(srv.url("/p.html"))
+            urls = " ".join(it["url"] for it in r["items"])
+            self.assertIn("100001.m4s", urls, "DASH 分片未被嗅探到")
+        finally:
+            if srv is not None:
+                srv.stop()
+
+    def test_tracker_parser_rejects_html(self):
+        """tracker 解析必须丢弃 HTML 页面内容（曾把整页源码当 tracker 存缓存）。"""
+        import bt_trackers
+        text = (
+            "\ufeff<!DOCTYPE html>\n<html>\n<head>\n"
+            '<meta charset="UTF-8" />\n<script>var a=1;</script>\n'
+            "udp://tracker.opentrackr.org:1337/announce\n"
+            "https://tracker.torrent.eu.org:443/announce\n"
+            "udp://tracker.opentrackr.org:1337/announce\n"      # 重复
+            "# 这是注释\n"
+            "  \n"
+        )
+        got = bt_trackers.parse_trackers(text)
+        self.assertEqual(len(got), 2, "HTML 未过滤或去重失败: %r" % got)
+        for x in got:
+            self.assertTrue(
+                x.startswith(("udp://", "http://", "https://", "ws://", "wss://")),
+                "出现非法 tracker: %r" % x)
+
+    def test_find_tmp_dir_rejects_traversal(self):
+        """续传目录定位必须拒绝路径穿越（安全基线）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(dlcore.find_tmp_dir(tmp, "../evil"))
+            self.assertIsNone(dlcore.find_tmp_dir(tmp, "a/b"))
+            self.assertIsNone(dlcore.find_tmp_dir(tmp, ""))
+
+
 if __name__ == "__main__":
     unittest.main()

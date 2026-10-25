@@ -23,7 +23,8 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes as wt
+import ctypes.wintypes  # noqa: F401  强制 PyInstaller 打包 ctypes.wintypes
+from ctypes import wintypes as wt
 import os
 import sys
 import threading
@@ -38,12 +39,16 @@ def _res_dir() -> str:
 
 
 def _icon_file(name: str = "tray.ico") -> str:
-    """按候选位置找图标：exe 同级 → 打包临时目录 → 源码目录"""
-    cands = [os.path.join(_res_dir(), name)]
+    """按候选位置找图标：_internal/ → 打包临时目录 → _assets/ → exe 同级 → 源码目录"""
+    exe_dir = _res_dir()
+    cands = [os.path.join(exe_dir, "_internal", name)]
     mei = getattr(sys, "_MEIPASS", "")
     if mei:
         cands.append(os.path.join(mei, name))
-    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), name))
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    cands.append(os.path.join(src_dir, "_assets", name))
+    cands.append(os.path.join(exe_dir, name))
+    cands.append(os.path.join(src_dir, name))
     for c in cands:
         if os.path.exists(c):
             return c
@@ -59,19 +64,19 @@ user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
 user32.DefWindowProcW.restype = ctypes.c_ssize_t
 
 user32.CreateWindowExW.argtypes = [
-    wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+    ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32,
     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    ctypes.c_void_p, ctypes.c_void_p, wt.HINSTANCE, ctypes.c_void_p]
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 user32.CreateWindowExW.restype = ctypes.c_void_p
 
 user32.RegisterClassW.argtypes = [ctypes.c_void_p]
-user32.RegisterClassW.restype = wt.ATOM
+user32.RegisterClassW.restype = ctypes.c_ushort
 
-user32.LoadImageW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, ctypes.c_uint,
+user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
                               ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 user32.LoadImageW.restype = ctypes.c_void_p
 
-user32.LoadIconW.argtypes = [wt.HINSTANCE, wt.LPCWSTR]
+user32.LoadIconW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
 user32.LoadIconW.restype = ctypes.c_void_p
 
 user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
@@ -92,7 +97,7 @@ user32.TranslateMessage.argtypes = [ctypes.c_void_p]
 
 user32.CreatePopupMenu.restype = ctypes.c_void_p
 user32.AppendMenuW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
-                               ctypes.c_size_t, wt.LPCWSTR]
+                               ctypes.c_size_t, ctypes.c_wchar_p]
 user32.TrackPopupMenu.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
                                   ctypes.c_void_p]
@@ -104,10 +109,10 @@ user32.PostQuitMessage.argtypes = [ctypes.c_int]
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
                                 ctypes.c_size_t, ctypes.c_ssize_t]
 
-shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.c_void_p]
+shell32.Shell_NotifyIconW.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
 shell32.Shell_NotifyIconW.restype = ctypes.c_int
 
-kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
 kernel32.GetModuleHandleW.restype = ctypes.c_void_p
 
 # ---- 常量 ----
@@ -151,28 +156,39 @@ ID_RESUME = 1003
 ID_OPENDIR = 1004
 ID_EXIT = 1005
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wt.HWND, ctypes.c_uint,
-                             wt.WPARAM, ctypes.c_ssize_t)
+class _MSG(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint),
+        ("wParam", ctypes.c_size_t),
+        ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_uint32),
+        ("pt", ctypes.c_long * 2),
+    ]
+
+
+WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, ctypes.c_void_p, ctypes.c_uint,
+                             ctypes.c_size_t, ctypes.c_ssize_t)
 # 说明：64 位下 LPARAM 是有符号指针宽度，用 c_ssize_t 表示，避免 OverflowError
 
 
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wt.DWORD),
-        ("hWnd", wt.HWND),
+        ("cbSize", ctypes.c_uint32),
+        ("hWnd", ctypes.c_void_p),
         ("uID", ctypes.c_uint),
         ("uFlags", ctypes.c_uint),
         ("uCallbackMessage", ctypes.c_uint),
-        ("hIcon", wt.HICON),
-        ("szTip", wt.WCHAR * 128),
-        ("dwState", wt.DWORD),
-        ("dwStateMask", wt.DWORD),
-        ("szInfo", wt.WCHAR * 256),
+        ("hIcon", ctypes.c_void_p),
+        ("szTip", ctypes.c_wchar * 128),
+        ("dwState", ctypes.c_uint32),
+        ("dwStateMask", ctypes.c_uint32),
+        ("szInfo", ctypes.c_wchar * 256),
         ("uVersion", ctypes.c_uint),
-        ("szInfoTitle", wt.WCHAR * 64),
-        ("dwInfoFlags", wt.DWORD),
+        ("szInfoTitle", ctypes.c_wchar * 64),
+        ("dwInfoFlags", ctypes.c_uint32),
         ("guidItem", ctypes.c_byte * 16),
-        ("hBalloonIcon", wt.HICON),
+        ("hBalloonIcon", ctypes.c_void_p),
     ]
 
 
@@ -182,12 +198,12 @@ class WNDCLASSW(ctypes.Structure):
         ("lpfnWndProc", WNDPROC),
         ("cbClsExtra", ctypes.c_int),
         ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wt.HINSTANCE),
-        ("hIcon", wt.HICON),
-        ("hCursor", wt.HANDLE),
-        ("hbrBackground", wt.HBRUSH),
-        ("lpszMenuName", wt.LPCWSTR),
-        ("lpszClassName", wt.LPCWSTR),
+        ("hInstance", ctypes.c_void_p),
+        ("hIcon", ctypes.c_void_p),
+        ("hCursor", ctypes.c_void_p),
+        ("hbrBackground", ctypes.c_void_p),
+        ("lpszMenuName", ctypes.c_wchar_p),
+        ("lpszClassName", ctypes.c_wchar_p),
     ]
 
 
@@ -233,7 +249,7 @@ class Tray:
             if h:
                 base = h
         if not base:
-            base = user32.LoadIconW(None, wt.LPCWSTR(IDI_APPLICATION))
+            base = user32.LoadIconW(None, ctypes.c_wchar_p(IDI_APPLICATION))
         icons["normal"] = base
 
         # 尝试用 PIL 生成不同颜色的变体（有 PIL 就用，没有就用同一图标）
@@ -444,7 +460,7 @@ class Tray:
             self._ready.set()
             user32.SetTimer(self.hwnd, 1, 2000, None)   # 每 2 秒刷新提示
 
-            msg = wt.MSG()
+            msg = _MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))

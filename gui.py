@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v3.1.3
+小助下载器 · 图形界面  gui.py   v3.1.8
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes  # noqa: F401  强制 PyInstaller 打包 ctypes.wintypes
+from ctypes import wintypes as wt
 import os
 import queue
 import re
@@ -465,11 +467,19 @@ class NewDownloadDialog(Dialog):
 
 class SettingsDialog(Dialog):
     def __init__(self, master, mgr, app=None):
-        super().__init__(master, "设置", 560, 540, resizable=True, scrollable=True)
+        # v3.1.8: 窗口加宽加高，两列紧凑排布，尽量一屏放下全部设置
+        try:
+            _sh = master.winfo_screenheight()
+        except Exception:
+            _sh = 1080
+        # 内容实测约 620px，1080p 屏给足 760 以免出现滚动条
+        _h = max(560, min(760, _sh - 100))
+        super().__init__(master, "设置", 760, _h, resizable=True, scrollable=True)
         self.mgr = mgr
         self.app = app
         self._entries: dict[str, tk.Entry] = {}
         self._errors: dict[str, tk.Label] = {}
+        self._err_frames: dict[str, tk.Frame] = {}
         c = mgr.cfg
         self.v_dir = tk.StringVar(value=c.get("download_dir", ""))
         self.v_conns = tk.IntVar(value=int(c.get("connections", 24)))
@@ -501,27 +511,6 @@ class SettingsDialog(Dialog):
             self.v_protocol.set(si.is_protocol_registered())
         except Exception:
             self.si = None
-
-    def _lbl(self, p, t, r):
-        tk.Label(p, text=t, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
-            row=r, column=0, sticky="w", pady=(0, 7))
-
-    def _ent(self, p, var, r, w=30, name=""):
-        """v3.0.8: 带实时校验的输入框，错误时边框变红并在下方显示提示。"""
-        fr = tk.Frame(p, bg=BG)
-        fr.grid(row=r, column=1, sticky="we", pady=(0, 7))
-        e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
-                     relief="solid", bd=1, highlightthickness=1,
-                     highlightbackground=BORDER, highlightcolor=ACCENT)
-        e.pack(side="top", fill="x", ipady=3)
-        err = tk.Label(fr, text="", bg=BG, fg=ERR, font=(FONT, 8))
-        err.pack(side="top", anchor="w")
-        key = name or f"row{r}"
-        self._entries[key] = e
-        self._errors[key] = err
-        e.bind("<KeyRelease>", lambda ev, k=key: self._validate(k))
-        e.bind("<FocusOut>", lambda ev, k=key: self._validate(k))
-        return e
 
     def _validate(self, key: str) -> bool:
         """实时校验单个输入框，返回是否通过。"""
@@ -571,6 +560,15 @@ class SettingsDialog(Dialog):
         color = ERR if not ok else BORDER
         e.config(highlightbackground=color)
         err.config(text=msg)
+        # v3.1.8: 错误提示用浮层显示，不撑高布局
+        if ok:
+            err.place_forget()
+        else:
+            try:
+                err.place(in_=e, relx=0, rely=1.0, x=0, y=1, anchor="nw")
+                err.lift()
+            except Exception:
+                pass
         return ok
 
     def _build(self):
@@ -605,53 +603,94 @@ class SettingsDialog(Dialog):
         self.bind("<Control-Alt-P>", lambda e: self._save_screenshot())
 
         f.columnconfigure(1, weight=1)
+        f.columnconfigure(3, weight=1)
+
+        def lbl(r, c, t, bold=False):
+            tk.Label(f, text=t, bg=BG, fg=FG,
+                     font=(FONT, 9, "bold" if bold else "normal")).grid(
+                row=r, column=c, sticky="w", pady=(0, 6))
+
+        def ent(var, r, c, w=10, name="", row_span=1):
+            """v3.1.8: 错误提示改为浮层叠加，不占布局高度。"""
+            fr = tk.Frame(f, bg=BG)
+            fr.grid(row=r, column=c, rowspan=row_span, sticky="w", pady=(2, 6))
+            e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
+                         relief="solid", bd=1, highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=ACCENT)
+            e.pack(side="top", ipady=3)
+            err = tk.Label(fr, text="", bg="#fff5f5", fg=ERR, font=(FONT, 8),
+                           anchor="w", padx=4)
+            key = name or f"row{r}"
+            self._entries[key] = e
+            self._errors[key] = err
+            self._err_frames[key] = fr
+            e.bind("<KeyRelease>", lambda ev, k=key: self._validate(k))
+            e.bind("<FocusOut>", lambda ev, k=key: self._validate(k))
+            return e
+
+        def cb(text, var, r, c, cs=1):
+            b = tk.Checkbutton(f, text=text, variable=var, bg=BG, fg=FG, font=(FONT, 9),
+                               activebackground=BG, selectcolor="#fff")
+            b.grid(row=r, column=c, columnspan=cs, sticky="w", pady=(0, 3))
+            return b
+
+        # 下载设置
         tk.Label(f, text="下载设置", bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        lbl(1, 0, "默认保存目录")
         fr = tk.Frame(f, bg=BG)
-        fr.grid(row=1, column=1, sticky="we", pady=(0, 7))
+        fr.grid(row=1, column=1, columnspan=3, sticky="we", pady=(0, 6))
         tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
                  relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
                  highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=3)
         tk.Button(fr, text="浏览", command=lambda: self._pick(self.v_dir),
                   font=(FONT, 9), bg="#eef1f6", fg=FG, relief="flat", padx=10,
                   cursor="hand2").pack(side="left", padx=(6, 0))
-        self._lbl(f, "默认保存目录", 1)
-        self._ent(f, self.v_conns, 2, 8)
-        self._lbl(f, "默认线程数", 2)
-        self._ent(f, self.v_par, 3, 8)
-        self._lbl(f, "同时下载任务数", 3)
-        self._ent(f, self.v_limit, 4, 8)
-        tk.Label(f, text="= 全局限速（KB/s，0 表示不限速）", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
-        self._lbl(f, "全局限速", 4)
-        self._ent(f, self.v_proxy, 5)
-        self._lbl(f, "代理服务器", 5)
-        self._ent(f, self.v_ua, 6)
-        self._lbl(f, "User-Agent", 6)
-        self._ent(f, self.v_port, 7, 8)
-        tk.Label(f, text="浏览器扩展对接端口", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=7, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
-        self._lbl(f, "本地接口端口", 7)
-        cb1 = tk.Checkbutton(f, text="任务完成后自动清理临时分片", variable=self.v_tmp, bg=BG,
-                             fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb1.grid(row=8, column=1, sticky="w", pady=(0, 4))
-        cb2 = tk.Checkbutton(f, text="忽略 HTTPS 证书错误（不推荐）", variable=self.v_insecure, bg=BG,
-                             fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb2.grid(row=9, column=1, sticky="w", pady=(0, 4))
-        cb5 = tk.Checkbutton(f, text="剪贴板监听（复制链接自动弹新建下载）",
-                             variable=self.v_clipboard, bg=BG,
-                             fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb5.grid(row=10, column=1, sticky="w", pady=(0, 4))
 
-        # ---- v3.0.0: 引擎选择 + BT 设置 ----
-        tk.Frame(f, bg=BORDER, height=1).grid(row=11, column=0, columnspan=3,
-                                              sticky="we", pady=(8, 6))
+        lbl(2, 0, "默认线程数")
+        ent(self.v_conns, 2, 1, 6, name="row2")
+        tk.Label(f, text="每个任务连接数（1-32）", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
+
+        lbl(2, 4, "同时下载任务数")
+        ent(self.v_par, 2, 5, 6, name="row3")
+        tk.Label(f, text="超过后排队", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=2, column=6, sticky="w", padx=(8, 0), pady=(0, 6))
+
+        lbl(3, 0, "全局限速")
+        ent(self.v_limit, 3, 1, 8, name="row4")
+        tk.Label(f, text="KB/s，0 表示不限速", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
+
+        lbl(3, 4, "本地接口端口")
+        ent(self.v_port, 3, 5, 6, name="row7")
+        tk.Label(f, text="浏览器扩展通信端口", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=3, column=6, sticky="w", padx=(8, 0), pady=(0, 6))
+
+        lbl(4, 0, "代理服务器")
+        ent(self.v_proxy, 4, 1, 28, name="row5")
+        tk.Label(f, text="形如 http://127.0.0.1:7890，留空为直连", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=4, column=2, columnspan=3, sticky="w",
+                                      padx=(8, 0), pady=(0, 6))
+
+        lbl(5, 0, "User-Agent")
+        ent(self.v_ua, 5, 1, 46, name="row6")
+
+        self.cb_tmp = cb("任务完成后自动清理临时分片", self.v_tmp, 6, 1, cs=2)
+        self.cb_insecure = cb("忽略 HTTPS 证书错误（不推荐）", self.v_insecure, 6, 3, cs=2)
+        self.cb_clipboard = cb("剪贴板监听（复制链接自动弹新建下载）", self.v_clipboard, 7, 1, cs=3)
+
+        # 引擎 / BT
+        tk.Frame(f, bg=BORDER, height=1).grid(row=8, column=0, columnspan=7,
+                                              sticky="we", pady=(10, 8))
         tk.Label(f, text="下载引擎 / BT 磁力", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=3,
-                                               sticky="w", pady=(0, 6))
-        # 引擎单选
+                 font=(FONT, 10, "bold")).grid(row=9, column=0, columnspan=4,
+                                               sticky="w", pady=(0, 8))
+
+        lbl(10, 0, "默认下载引擎")
         eng_frame = tk.Frame(f, bg=BG)
-        eng_frame.grid(row=13, column=1, sticky="w", pady=(0, 4))
+        eng_frame.grid(row=10, column=1, columnspan=4, sticky="w", pady=(0, 6))
         tk.Radiobutton(eng_frame, text="内置多线程引擎（默认，最快）",
                        variable=self.v_engine, value="builtin",
                        bg=BG, fg=FG, font=(FONT, 9),
@@ -660,49 +699,36 @@ class SettingsDialog(Dialog):
                        variable=self.v_engine, value="aria2",
                        bg=BG, fg=FG, font=(FONT, 9),
                        activebackground=BG, selectcolor="#fff").pack(side="left")
-        self._lbl(f, "默认下载引擎", 13)
-        # BT trackers 源
-        self._ent(f, self.v_bt_source, 14, 38)
-        self._lbl(f, "BT Trackers 源", 14)
-        tk.Label(f, text="每次启动时自动从此地址拉取最新 trackers", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=14, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
-        # 自动更新开关
-        cb_bt = tk.Checkbutton(f, text="启动时自动更新 BT trackers（推荐）",
-                               variable=self.v_bt_autoupdate, bg=BG,
-                               fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb_bt.grid(row=15, column=1, sticky="w", pady=(0, 4))
-        # v3.0.2: tracker 测速过滤开关（默认开启）
-        cb_bt_probe = tk.Checkbutton(f, text="BT Tracker 测速过滤（只保留可达 tracker，推荐开启）",
-                                     variable=self.v_bt_probe_alive, bg=BG,
-                                     fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb_bt_probe.grid(row=16, column=1, sticky="w", pady=(0, 4))
 
-        # ---- 系统集成 ----
-        tk.Frame(f, bg=BORDER, height=1).grid(row=17, column=0, columnspan=3,
-                                              sticky="we", pady=(8, 6))
-        tk.Label(f, text="系统集成（让浏览器点击下载自动唤起）", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=18, column=0, columnspan=3,
-                                               sticky="w", pady=(0, 6))
-        cb3 = tk.Checkbutton(f, text="开机自启（后台静默运行，不弹窗）",
-                             variable=self.v_autostart, bg=BG, fg=FG, font=(FONT, 9),
-                             activebackground=BG, selectcolor="#fff")
-        cb3.grid(row=19, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        cb4 = tk.Checkbutton(f, text="注册 xzd:// 协议（扩展可唤起下载器）",
-                             variable=self.v_protocol, bg=BG, fg=FG, font=(FONT, 9),
-                             activebackground=BG, selectcolor="#fff")
-        cb4.grid(row=20, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        lbl(11, 0, "BT Trackers 源")
+        ent(self.v_bt_source, 11, 1, 46, name="row14")
+        tk.Label(f, text="启动时从此地址拉取 trackers", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=11, column=2, columnspan=3, sticky="w",
+                                      padx=(8, 0), pady=(0, 6))
+
+        self.cb_bt_autoupdate = cb("启动时自动更新 BT trackers（推荐）", self.v_bt_autoupdate, 12, 1, cs=3)
+        self.cb_bt_probe = cb("BT Tracker 测速过滤（只保留可达 tracker，推荐开启）", self.v_bt_probe_alive, 12, 4, cs=3)
+
+        # 系统集成
+        tk.Frame(f, bg=BORDER, height=1).grid(row=13, column=0, columnspan=7,
+                                              sticky="we", pady=(10, 8))
+        tk.Label(f, text="系统集成", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).grid(row=14, column=0, columnspan=4,
+                                               sticky="w", pady=(0, 8))
+        self.cb_autostart = cb("开机自启（后台静默运行，不弹窗）", self.v_autostart, 15, 1, cs=3)
+        self.cb_protocol = cb("注册 xzd:// 协议（浏览器点击下载自动唤起）", self.v_protocol, 15, 4, cs=3)
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
-                               justify="left", wraplength=420)
-        self.lbl_si.grid(row=21, column=0, columnspan=3, sticky="w", pady=(2, 4))
+                               justify="left", wraplength=560)
+        self.lbl_si.grid(row=16, column=1, columnspan=6, sticky="w", pady=(2, 4))
         if self.si is None:
-            cb3.config(state="disabled")
-            cb4.config(state="disabled")
+            self.cb_autostart.config(state="disabled")
+            self.cb_protocol.config(state="disabled")
             self.lbl_si.config(text="当前环境不支持系统集成（仅 Windows 可用）", fg=ERR)
         else:
             self._refresh_si_label()
 
         tk.Label(f, text="全程离线：不检查更新、不联网校验、不上报任何数据",
-                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=22, column=0, columnspan=3,
+                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=17, column=0, columnspan=7,
                                                       sticky="w", pady=(4, 8))
 
         # 底部按钮栏（固定，不随内容滚动）
@@ -964,8 +990,8 @@ class HelpDialog(Dialog):
         steps = [
             "打开 Chrome：chrome://extensions 或 Edge：edge://extensions",
             "打开右上角「开发者模式」",
-            "点「加载已解压的扩展程序」",
-            f"选择安装目录下的 browser-extension 文件夹（{dlcore.app_root() if not dlcore.is_frozen() else '安装目录'}\\browser-extension）",
+            "把安装目录下的 browser-extension.crx 改后缀为 .zip，解压得到文件夹",
+            "点「加载已解压的扩展程序」，选择上一步解压出的文件夹",
             "建议把扩展图标固定到工具栏",
         ]
         for i, st in enumerate(steps, 1):
@@ -1211,7 +1237,8 @@ class App:
         except Exception:
             _port = int(self.mgr.cfg.get("port", 8763))
         self.api = localserver.LocalAPI(self.mgr, port=_port,
-                                        on_wake=self._on_api_wake)
+                                        on_wake=self._on_api_wake,
+                                        on_help=self._on_api_help)
         self.api_ok = self.api.start()
         boot_mark("api_started")
 
@@ -1265,6 +1292,9 @@ class App:
         self._clip_fallback_thread = None
         if self._clip_enabled:
             self._start_clipboard_listener()
+
+        # ---- 帮助窗口单例 ----
+        self._help_dialog = None
 
     def _write_pid(self):
         try:
@@ -1373,6 +1403,20 @@ class App:
         except Exception:
             dlcore.LOG.debug('忽略异常：root.after(0, lambda: _handle_protocol(link))')
 
+    def _on_api_help(self):
+        """接口 /help 回调——打开主窗口并显示帮助页"""
+        try:
+            self.root.after(0, self._show_help_window)
+        except Exception:
+            dlcore.LOG.debug('忽略异常：root.after(0, self._show_help_window)')
+
+    def _show_help_window(self):
+        try:
+            self.show_window()
+            self._open_help()
+        except Exception:
+            dlcore.LOG.debug('忽略异常：_show_help_window')
+
     def _handle_protocol(self, url: str):
         """处理 xzd:// 协议唤起：add?url=xxx 或 show"""
         try:
@@ -1449,9 +1493,6 @@ class App:
         btn(right, "设置", self._open_settings_panel, compact=True)
         btn(right, "打开目录", lambda: open_in_explorer(self.mgr.cfg.get("download_dir", "")), compact=True)
 
-    def _open_help(self):
-        HelpDialog(self.root, self.mgr)
-
         # 主体：两个标签页
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 6))
@@ -1469,6 +1510,26 @@ class App:
         self.lbl_status.pack(side="left")
         self.lbl_speed = tk.Label(sb, text="", bg=BG, fg=ACCENT, font=(FONT, 9, "bold"))
         self.lbl_speed.pack(side="right")
+
+    def _open_help(self):
+        if self._help_dialog is not None:
+            try:
+                self._help_dialog.deiconify()
+                self._help_dialog.lift()
+                self._help_dialog.focus_force()
+                return
+            except Exception:
+                self._help_dialog = None
+        self._help_dialog = HelpDialog(self.root, self.mgr)
+        self._help_dialog.protocol("WM_DELETE_WINDOW", self._on_help_close)
+
+    def _on_help_close(self):
+        if self._help_dialog is not None:
+            try:
+                self._help_dialog.destroy()
+            except Exception:
+                pass
+            self._help_dialog = None
 
     def _build_tasks(self):
         wrap = tk.Frame(self.tab_tasks, bg=CARD)
@@ -2155,6 +2216,32 @@ class App:
         return False
 
 
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [
+        ("style", ctypes.c_uint),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", ctypes.c_void_p),
+        ("hIcon", ctypes.c_void_p),
+        ("hCursor", ctypes.c_void_p),
+        ("hbrBackground", ctypes.c_void_p),
+        ("lpszMenuName", ctypes.c_wchar_p),
+        ("lpszClassName", ctypes.c_wchar_p),
+    ]
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint),
+        ("wParam", ctypes.c_size_t),
+        ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_uint32),
+        ("pt", ctypes.c_long * 2),
+    ]
+
+
 class ClipboardListener:
     """v3.0.8: Windows 原生剪贴板事件监听（零 CPU 轮询）。"""
 
@@ -2162,11 +2249,11 @@ class ClipboardListener:
     WM_DESTROY = 0x0002
 
     _WNDPROC = ctypes.WINFUNCTYPE(
-        ctypes.wintypes.LRESULT,
-        ctypes.wintypes.HWND,
-        ctypes.wintypes.UINT,
-        ctypes.wintypes.WPARAM,
-        ctypes.wintypes.LPARAM)
+        ctypes.c_ssize_t,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_size_t,
+        ctypes.c_ssize_t)
 
     def __init__(self, on_change):
         self.on_change = on_change
@@ -2190,7 +2277,7 @@ class ClipboardListener:
     def _run(self):
         try:
             hinst = ctypes.windll.kernel32.GetModuleHandleW(None)
-            wc = ctypes.wintypes.WNDCLASSW()
+            wc = _WNDCLASSW()
             wc.lpfnWndProc = self._proc_ref
             wc.lpszClassName = "XZDClipboardListener"
             wc.hInstance = hinst
@@ -2208,7 +2295,7 @@ class ClipboardListener:
                 self._hwnd = None
                 return
             self._running.set()
-            msg = ctypes.wintypes.MSG()
+            msg = _MSG()
             while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
                 ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))

@@ -11,11 +11,10 @@
   · 用户要的是「双击安装 → 之后一直安静跑」，不是「每次启动等解压」。
 
 资源策略：
-  · tray.ico / browser-extension/ / 使用说明.md 由构建脚本**拷到 exe 同级**，
-    这样用户能直接看到「浏览器扩展」文件夹（需要手动在 Chrome/Edge 里加载），
-    协议图标的 DefaultIcon 路径也才有效。
-  · 同时把 tray.ico 塞一份进 _internal/（打包内），
-    万一用户只拷了 exe+_internal 而漏了同级 ico，托盘也不会变成白板。
+  · browser-extension.crx / 使用说明.md / 浏览器扩展安装指引.png 由构建脚本**拷到 exe 同级**，
+    这样用户能直接看到扩展文件和说明图。
+  · tray.ico 放在 _assets/ 下，由 PyInstaller datas 打包到 _internal/，
+    安装目录根目录不再保留图标文件。
   · third_party/aria2/ 内置 aria2c.exe + N_m3u8DL-RE.exe（v2.6.0），
     安装包自包含，用户无需额外安装即可使用 aria2c 备用极速通道。
 
@@ -50,8 +49,8 @@ a = Analysis(
     pathex=[ROOT],
     binaries=[],
     datas=[
-        # 内嵌一份图标（兜底）：one-dir 下会落到 _internal/
-        (os.path.join(ROOT, "tray.ico"), "."),
+        # 图标放在 _assets/，打包时会落到 _internal/；运行时也会释放到 exe 同级
+        (os.path.join(ROOT, "_assets", "tray.ico"), "."),
         # v2.6.0：内置 aria2c + N_m3u8DL-RE，安装包自包含，无需用户安装
         (os.path.join(ROOT, "third_party", "aria2"), "third_party/aria2"),
     ],
@@ -101,7 +100,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(ROOT, "tray.ico"),
+    icon=os.path.join(ROOT, "_assets", "tray.ico"),
     version=None,
 )
 

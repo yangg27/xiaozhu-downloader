@@ -36,7 +36,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.1.3"
+VERSION = "3.1.8"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -74,7 +74,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(ROOT, "tray.ico") if os.path.exists(os.path.join(ROOT, "tray.ico")) else None,
+    icon=os.path.join(ROOT, "_assets", "tray.ico") if os.path.exists(os.path.join(ROOT, "_assets", "tray.ico")) else None,
 )
 '''
 
@@ -88,7 +88,8 @@ from __future__ import annotations
 
 import base64
 import ctypes
-import ctypes.wintypes
+import ctypes.wintypes  # noqa: F401  强制 PyInstaller 打包 ctypes.wintypes
+from ctypes import wintypes
 import os
 import shutil
 import subprocess
@@ -148,7 +149,7 @@ def _wait_pid_dead(pid: int, timeout: float = 5.0):
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
-            import ctypes.wintypes
+            from ctypes import wintypes
             h = ctypes.windll.kernel32.OpenProcess(0x00000001, False, pid)
             if not h:
                 return True
@@ -296,7 +297,7 @@ def _register(exe: str):
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:" + APP_NAME + " Protocol")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, proto + r"\\DefaultIcon", 0, winreg.KEY_SET_VALUE) as k:
-            ico = os.path.join(INSTALL_DIR, "tray.ico")
+            ico = os.path.join(INSTALL_DIR, "_internal", "tray.ico")
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, ico if os.path.exists(ico) else exe)
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, proto + r"\\shell\\open\\command", 0, winreg.KEY_SET_VALUE) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f'"{exe}" "%1"')
@@ -321,7 +322,7 @@ def _register(exe: str):
 
 
 def _create_shortcuts(exe: str):
-    ico = os.path.join(INSTALL_DIR, "tray.ico")
+    ico = os.path.join(INSTALL_DIR, "_internal", "tray.ico")
     if not os.path.exists(ico):
         ico = ""
     _create_shortcut(_shortcut_for(APP_NAME), exe, icon=ico, desc=APP_NAME)
@@ -442,6 +443,97 @@ def _message_box(msg: str, title: str = APP_NAME, style: int = 0x40):
         return 1
 
 
+def _show_result_dialog(title: str, message: str, buttons: list[tuple[str, str]]):
+    """用 tkinter 显示可自定义按钮文字的对话框。
+
+    buttons: [(label, return_value), ...]
+    返回被点击按钮对应的 return_value，关闭窗口返回最后一个 return_value。
+    """
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception:
+        return buttons[-1][1] if buttons else None
+
+    result = buttons[-1][1] if buttons else None
+
+    def choose(val):
+        nonlocal result
+        result = val
+        root.destroy()
+
+    root = tk.Tk()
+    root.title(title)
+    root.geometry("420x200")
+    root.resizable(False, False)
+    root.configure(bg="#f8f9fa")
+    root.attributes("-topmost", True)
+    try:
+        root.iconbitmap(os.path.join(INSTALL_DIR, "_internal", "tray.ico"))
+    except Exception:
+        pass
+
+    frm = tk.Frame(root, bg="#f8f9fa", padx=20, pady=20)
+    frm.pack(fill=tk.BOTH, expand=True)
+
+    lbl = tk.Label(frm, text=message, justify=tk.LEFT, wraplength=360,
+                   bg="#f8f9fa", fg="#212529", font=("Microsoft YaHei UI", 10))
+    lbl.pack(fill=tk.BOTH, expand=True, anchor=tk.W)
+
+    btn_frm = tk.Frame(frm, bg="#f8f9fa")
+    btn_frm.pack(fill=tk.X, pady=(10, 0))
+    for label, val in buttons:
+        ttk.Button(btn_frm, text=label, command=lambda v=val: choose(v)).pack(side=tk.RIGHT, padx=5)
+
+    root.update_idletasks()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    w, h = root.winfo_width(), root.winfo_height()
+    root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    root.mainloop()
+    return result
+
+
+def _data_dir() -> str:
+    """与主程序一致的数据目录：%APPDATA%\\小助下载器"""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, APP_NAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _api_port() -> int:
+    """读取主程序写下的端口提示，失败返回 0"""
+    try:
+        p = os.path.join(_data_dir(), "api.port")
+        with open(p, "r", encoding="utf-8") as f:
+            port = int(f.read().strip())
+        return port if 1024 <= port <= 65535 else 0
+    except Exception:
+        return 0
+
+
+def _open_help():
+    """调用运行中主程序的 /help 接口打开帮助页面；失败则兜底打开使用说明。"""
+    import urllib.request
+    port = _api_port()
+    if port:
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/help", method="GET")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                resp.read()
+            return
+        except Exception:
+            pass
+    # 兜底：打开使用说明文件
+    p = os.path.join(INSTALL_DIR, "使用说明.md")
+    if os.path.exists(p):
+        try:
+            subprocess.Popen(["explorer", os.path.abspath(p)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 def _is_control_panel_uninstall():
     """判断是否由控制面板/系统卸载入口调用（参数里带 /S 或 /u）。"""
     if len(sys.argv) <= 1:
@@ -450,22 +542,27 @@ def _is_control_panel_uninstall():
     return a in ("u", "uninstall") or a.startswith("uninstall")
 
 
+def _is_silent_install():
+    """判断是否要求静默安装（参数带 /S /silent /quiet）。"""
+    if len(sys.argv) <= 1:
+        return False
+    a = sys.argv[1].lower().lstrip("-/")
+    return a in ("s", "silent", "quiet")
+
+
 def _choose_uninstall_or_repair():
     """弹出选择：卸载 / 重装。返回 'uninstall' | 'repair' | 'cancel'。"""
-    # MB_YESNOCANCEL + 问号图标；Yes=重装，No=卸载，Cancel=取消
-    res = _message_box(
-        "您正在运行小助下载器卸载程序。\n\n"
-        "· 点击「是」→ 保留用户数据并重新安装（修复/重装）\n"
-        "· 点击「否」→ 卸载软件（保留下载的文件和设置）\n"
-        "· 点击「取消」→ 什么都不做",
+    msg = (
+        "检测到已安装过本软件。\n\n"
+        "· 重装：保留之前的下载文件和设置，重新安装一遍（可修复异常）\n"
+        "· 卸载：删除软件，但保留下载目录里的文件和配置\n"
+        "· 取消：不执行任何操作"
+    )
+    return _show_result_dialog(
         f"卸载 / 重装 {APP_NAME}",
-        0x23)  # MB_YESNOCANCEL | MB_ICONQUESTION
-    # IDYES=6, IDNO=7, IDCANCEL=2, IDOK=1
-    if res == 6:
-        return "repair"
-    if res == 7:
-        return "uninstall"
-    return "cancel"
+        msg,
+        [("取消", "cancel"), ("卸载", "uninstall"), ("重装", "repair")]
+    )
 
 
 def _repair():
@@ -549,6 +646,12 @@ def _do_repair_from_helper():
     os._exit(0)
 
 
+def _is_uninstaller_exe() -> bool:
+    """当前可执行文件是否为卸载器副本。"""
+    name = os.path.basename(sys.executable).lower()
+    return name in ("卸载.exe", "uninstall.exe")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "__DO_UNINSTALL__":
         _do_uninstall_from_helper()
@@ -556,14 +659,33 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "__DO_REPAIR__":
         _do_repair_from_helper()
         return
-    if len(sys.argv) > 1 and sys.argv[1].lower().lstrip("-/") in ("u", "uninstall"):
+    arg = sys.argv[1].lower().lstrip("-/") if len(sys.argv) > 1 else ""
+
+    # 卸载器被 /S /silent /quiet 调用 → 静默卸载
+    if _is_uninstaller_exe() and arg in ("s", "silent", "quiet"):
+        uninstall()
+        return
+    # 卸载器被 /U 调用 → 卸载
+    if _is_uninstaller_exe() and arg in ("u", "uninstall"):
+        uninstall()
+        return
+
+    # 安装器被 /S /silent /quiet 调用 → 静默安装
+    if arg in ("s", "silent", "quiet"):
+        try:
+            install()
+        except Exception:
+            pass
+        return
+    if arg in ("u", "uninstall"):
         uninstall()
         return
     if _is_already_running():
         _message_box("安装器已经在运行。")
         return
-    # 控制面板调用直接卸载；用户主动双击卸载器则给选择
-    if os.path.basename(sys.executable).lower() in ("卸载.exe", "uninstall.exe") and not _is_control_panel_uninstall():
+    # 控制面板调用直接卸载；用户主动双击卸载器则给选择；静默模式直接卸载
+    is_silent = _is_silent_install()
+    if os.path.basename(sys.executable).lower() in ("卸载.exe", "uninstall.exe") and not _is_control_panel_uninstall() and not is_silent:
         choice = _choose_uninstall_or_repair()
         if choice == "repair":
             _repair()
@@ -572,16 +694,23 @@ def main():
             uninstall()
             return
         return
+    silent = _is_silent_install()
     try:
         install()
-        _message_box(
-            f"{APP_NAME} v{VERSION} 安装完成。\n"
-            f"安装位置：{INSTALL_DIR}\n\n"
-            f"· 浏览器扩展位于安装目录下的 browser-extension 文件夹，请手动加载一次。\n"
-            f"· 任务记录、配置和历史已保留（位于 %APPDATA%\\{APP_NAME}）。",
-            "安装完成")
+        if not silent:
+            choice = _show_result_dialog(
+                "安装完成",
+                f"{APP_NAME} v{VERSION} 已安装到：\n{INSTALL_DIR}\n\n"
+                "· 软件已自动在后台启动，托盘区可找到图标\n"
+                "· 浏览器扩展：将 crx 改后缀为 zip 解压后加载\n"
+                "· 任务记录和设置会自动保留",
+                [("查看帮助", "help"), ("开始使用", "done")]
+            )
+            if choice == "help":
+                _open_help()
     except Exception as e:
-        _message_box(f"安装失败：{type(e).__name__}: {e}", "安装失败", 0x10)
+        if not silent:
+            _message_box(f"安装失败：{type(e).__name__}: {e}", "安装失败", 0x10)
         raise
 
 
@@ -641,7 +770,7 @@ def run():
         f.write(SETUP_PY_FOOTER)
 
     # 2) 复制图标
-    ico_src = os.path.join(ROOT, "tray.ico")
+    ico_src = os.path.join(ROOT, "_assets", "tray.ico")
     ico_dst = os.path.join(OUT_DIR, "tray.ico")
     if os.path.exists(ico_src):
         shutil.copy2(ico_src, ico_dst)

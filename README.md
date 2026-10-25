@@ -60,8 +60,8 @@
 
 ### 方式一：安装包（推荐，无需 Python）
 
-下载 **[`xiaozhu-downloader-v3.1.3-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v3.1.3-setup.exe)**
-（约 100 MB）→ 拷到任意 Windows 11 → **双击安装**。
+下载 **[`xiaozhu-downloader-v3.1.8-setup.exe`](https://github.com/yangg27/xiaozhu-downloader/releases/latest/download/xiaozhu-downloader-v3.1.8-setup.exe)**
+（约 41 MB）→ 拷到任意 Windows 11 → **双击安装**。
 安装后自动完成开机自启 + `xzd://` 协议注册，无需管理员权限。
 
 ### 方式二：源码运行（需要带 tkinter 的 Python 3）
@@ -97,8 +97,8 @@
 ### 浏览器扩展安装（Chrome / Edge）
 1. 地址栏输入 `chrome://extensions` 或 `edge://extensions`
 2. 打开右上角 **「开发者模式」**
-3. 点 **「加载已解压的扩展程序」**
-4. 选择本目录下的 **`browser-extension`** 文件夹
+3. 把 `browser-extension.crx` 改后缀为 `.zip` 并解压
+4. 点 **「加载已解压的扩展程序」**，选择解压后的 `browser-extension` 文件夹
 
 ---
 
@@ -110,7 +110,7 @@
 
 ![打开扩展管理页](docs/screenshots/ext-1-open.png)
 
-**第 2 步**：在弹出的窗口中，选中安装目录下的 **`browser-extension`** 文件夹，点 **「选择文件夹」**。
+**第 2 步**：先把安装目录下的 `browser-extension.crx` 改后缀为 `.zip` 并解压；然后在弹出的窗口中选中解压后的 **`browser-extension`** 文件夹，点 **「选择文件夹」**。
 
 ![选择扩展目录](docs/screenshots/ext-2-select.png)
 
@@ -118,7 +118,7 @@
 
 ![安装成功](docs/screenshots/ext-3-done.png)
 
-> 💡 找不到 `browser-extension` 文件夹？它就在软件的安装目录里（安装完成时界面上有显示路径）。
+> 💡 找不到扩展文件？安装目录下有一个 `browser-extension.crx`，改后缀为 `.zip` 解压后就会得到 `browser-extension` 文件夹。
 
 ### 教程二：如何嗅探并下载网页资源
 
@@ -149,11 +149,12 @@ xiaozhu-downloader/
 ├── localserver.py          # 本地接口（供浏览器扩展对接）
 ├── sysintegration.py       # 系统集成（开机自启 / 协议注册 / 单实例转交）
 ├── tray.py                 # 系统托盘（纯 ctypes，零第三方依赖）
-├── tray.ico                # 托盘与协议图标
+├── _assets/
+│   ├── tray.ico            # 托盘与协议图标（打包后位于 _internal/）
+│   └── browser-extension/  # 浏览器扩展源码（Chrome / Edge 通用）
 ├── xzd_app.spec            # PyInstaller 打包配置
-├── 一键设置.bat / 启动下载器.bat / 打开下载器窗口.bat
-├── 使用说明.md              # ★ 完整中文文档（含 12 个版本的优化记录）
-└── browser-extension/      # 浏览器扩展（Chrome / Edge 通用）
+├── 使用说明.md              # 使用说明
+└── README.md               # 项目说明
 ```
 
 ---
@@ -198,15 +199,14 @@ xiaozhu-downloader/
 ### 4. 空闲占用优化
 长期驻留时 CPU 占用降至 **0.00%**。
 
-> 完整优化记录（v1.3.0 → v1.14.0，含每轮的问题、定位过程、修复、实测数据）
-> 见 [`使用说明.md` 第八章](使用说明.md)。
+> 各版本修复记录见根目录的 `RELEASE_NOTES_v*.md` 与 `TEST_REPORT_v*.md`（含实测数据）。
 
 ---
 
 ## 隐私与安全
 
 - **完全离线**：不联网校验、不检查更新、不上报任何数据
-- **本地存储**：配置与任务记录均在程序目录下的 `data/` 中
+- **本地存储**：配置与任务记录存放于 `%APPDATA%\小助下载器`（源码运行时为项目内 `data/`）
 - **注册表仅写 `HKCU`**：不需要管理员权限，卸载时自动清理
 - **零第三方依赖**：托盘、单实例、协议注册均为纯 ctypes / 标准库实现
 
