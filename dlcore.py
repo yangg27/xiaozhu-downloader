@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "2.6.0"
+ENGINE_VERSION = "3.0.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -491,7 +491,14 @@ def guess_ext_from_mime(mime: str) -> str:
 
 
 def kind_of_url(url: str) -> str:
-    p = urllib.parse.urlsplit(url).path.lower()
+    if not url:
+        return "page"
+    u = url.strip().lower()
+    if u.startswith("magnet:"):
+        return "bt"
+    p = urllib.parse.urlsplit(u).path
+    if p.endswith(".torrent"):
+        return "bt"
     if p.endswith(STREAM_EXTS):
         return "hls"
     if p.endswith(MEDIA_EXTS) or p.endswith(ARCHIVE_EXTS):
@@ -927,7 +934,7 @@ class DownloadTask:
         self.filename = safe_filename(filename) if filename else filename_from_url(url)
         self.tid = tid or hashlib.md5(f"{url}|{now()}".encode("utf-8")).hexdigest()[:12]
         self.requested_conns = max(1, min(32, int(conns)))
-        self.kind = kind if kind in ("file", "hls") else kind_of_url(url)
+        self.kind = kind if kind in ("file", "hls", "bt") else kind_of_url(url)
         self.speed_limit = max(0, int(speed_limit or 0))
         self.group = group or ""
         self.added_at = added_at or now()
@@ -2367,6 +2374,87 @@ class FileDownload(DownloadTask):
 
 
 # --------------------------------------------------------------------------
+# BT / 磁力链接 下载（v3.0.0）
+# --------------------------------------------------------------------------
+
+class BTDownload(DownloadTask):
+    """BT 种子 / 磁力链下载：直接走内置 aria2c 子进程。
+    与 FileDownload 的"失败时切换 aria2c"不同，BTDownload 一开始就使用 aria2c，
+    因为内置引擎只实现了 HTTP/HLS。
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.kind = "bt"
+
+    def _session(self):
+        try:
+            import aria2_bridge
+        except Exception as exc:
+            raise RuntimeError(f"aria2c 通道不可用：{exc}")
+
+        # 取最新 trackers（缓存优先，无缓存同步拉一次）
+        trackers = []
+        try:
+            import bt_trackers
+            trackers, src = bt_trackers.get_trackers(prefer_cache=True, allow_fetch=True, timeout=5.0)
+            LOG.debug("BT trackers 来源: %s, 共 %d 条", src, len(trackers))
+        except Exception:
+            LOG.debug("bt_trackers 拉取失败，仅用 DHT")
+
+        self.phase = "BT 解析元数据…"
+        self.mgr.notify()
+        result = aria2_bridge.run_aria2(
+            self.url, self.out_dir, filename=self.filename,
+            referer=self.http.referer, cookie=self.http.cookie,
+            headers=dict(self.http.extra),
+            user_agent=self.http.ua,
+            proxy="",  # BT 流量不走代理
+            connections=16,
+            trackers=trackers,
+            task=self)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "aria2c BT 下载失败"))
+        # run_aria2 已自动把 task 状态置为 done
+        # 附加记录：种子文件列表
+        try:
+            self.extra["bt_files"] = result.get("files", [])
+            self.extra["bt_file_count"] = result.get("file_count", 0)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
+# aria2c 引擎直通的 HTTP 下载（v3.0.0，用户可在设置中选择）
+# --------------------------------------------------------------------------
+
+class Aria2FileDownload(DownloadTask):
+    """engine=aria2 时的普通 HTTP 下载：跳过内置多线程引擎，直接走 aria2c。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.kind = "file"  # 与 FileDownload 一致，保证 UI 显示兼容
+
+    def _session(self):
+        try:
+            import aria2_bridge
+        except Exception as exc:
+            raise RuntimeError(f"aria2c 通道不可用：{exc}")
+        self.phase = "aria2c 引擎下载中"
+        self.mgr.notify()
+        result = aria2_bridge.run_aria2(
+            self.url, self.out_dir, filename=self.filename,
+            referer=self.http.referer, cookie=self.http.cookie,
+            headers=dict(self.http.extra),
+            user_agent=self.http.ua,
+            proxy=self.http._proxy,
+            connections=min(16, self.requested_conns),
+            task=self)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "aria2c 下载失败"))
+
+
+# --------------------------------------------------------------------------
 # HLS (m3u8) 下载
 # --------------------------------------------------------------------------
 
@@ -2886,6 +2974,12 @@ DEFAULT_CFG = {
     "user_agent": DEFAULT_UA,
     "port": 8763,
     "auto_start_tasks": True,
+    # v3.0.0: 默认下载引擎，"builtin" = 内置多线程引擎，"aria2" = 全部走 aria2c
+    "engine": "builtin",
+    # v3.0.0: BT trackers 订阅地址（启动时自动拉取最新）
+    "bt_tracker_source": "https://cf.trackerslist.com/best.txt",
+    # v3.0.0: 启动时是否自动更新 trackers（建议开启）
+    "bt_trackers_autoupdate": True,
 }
 
 
@@ -2904,6 +2998,13 @@ class Manager:
         self._lock = threading.RLock()
         self._cv = threading.Condition()
         self._slot_holders: set[str] = set()
+        # v3.0.0: 启动时后台更新 BT trackers（不阻塞 GUI）
+        if self.cfg.get("bt_trackers_autoupdate", True):
+            try:
+                import bt_trackers
+                bt_trackers.update_async(timeout=6.0)
+            except Exception:
+                pass
 
     # ---- 配置 ----
     def cfg_path(self) -> str:
@@ -2985,12 +3086,21 @@ class Manager:
         conns = int(conns if conns is not None else self.cfg.get("connections", 16))
         speed_limit = int(speed_limit if speed_limit is not None else self.cfg.get("speed_limit", 0))
         out_dir = os.path.abspath(out_dir or self.cfg.get("download_dir"))
-        k = kind if kind in ("file", "hls") else kind_of_url(url)
+        k = kind if kind in ("file", "hls", "bt") else kind_of_url(url)
         headers = dict(headers or {})
         if "User-Agent" not in headers and self.cfg.get("user_agent"):
             headers["User-Agent"] = self.cfg["user_agent"]
 
-        cls = HLSDownload if k == "hls" else FileDownload
+        if k == "bt":
+            cls = BTDownload
+        elif k == "hls":
+            cls = HLSDownload
+        else:
+            # v3.0.0: engine=aria2 时普通 HTTP 任务也走 aria2c（用户可选）
+            if (self.cfg.get("engine") or "builtin").lower() == "aria2":
+                cls = Aria2FileDownload
+            else:
+                cls = FileDownload
         # 同名任务去重（同一 URL 未完成时直接复用）
         with self._lock:
             for tid in self.order:

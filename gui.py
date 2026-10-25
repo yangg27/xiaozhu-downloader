@@ -409,6 +409,10 @@ class SettingsDialog(Dialog):
         self.v_insecure = tk.BooleanVar(value=bool(c.get("insecure", False)))
         self.v_port = tk.IntVar(value=int(c.get("port", 8763)))
         self.v_clipboard = tk.BooleanVar(value=bool(c.get("clipboard_watch", True)))
+        # v3.0.0: 引擎与 BT 设置
+        self.v_engine = tk.StringVar(value=str(c.get("engine", "builtin")))
+        self.v_bt_source = tk.StringVar(value=str(c.get("bt_tracker_source", "https://cf.trackerslist.com/best.txt")))
+        self.v_bt_autoupdate = tk.BooleanVar(value=bool(c.get("bt_trackers_autoupdate", True)))
         # 系统集成状态
         self.si = None
         self.v_autostart = tk.BooleanVar(value=False)
@@ -478,23 +482,52 @@ class SettingsDialog(Dialog):
                              fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
         cb5.grid(row=10, column=1, sticky="w", pady=(0, 6))
 
-        # ---- 系统集成 ----
+        # ---- v3.0.0: 引擎选择 + BT 设置 ----
         tk.Frame(f, bg=BORDER, height=1).grid(row=11, column=0, columnspan=3,
                                               sticky="we", pady=(10, 8))
-        tk.Label(f, text="系统集成（让浏览器点击下载自动唤起）", bg=BG, fg=FG,
+        tk.Label(f, text="下载引擎 / BT 磁力", bg=BG, fg=FG,
                  font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=3,
+                                               sticky="w", pady=(0, 8))
+        # 引擎单选
+        eng_frame = tk.Frame(f, bg=BG)
+        eng_frame.grid(row=13, column=1, sticky="w", pady=(0, 6))
+        tk.Radiobutton(eng_frame, text="内置多线程引擎（默认，最快）",
+                       variable=self.v_engine, value="builtin",
+                       bg=BG, fg=FG, font=(FONT, 9),
+                       activebackground=BG, selectcolor="#fff").pack(side="left", padx=(0, 12))
+        tk.Radiobutton(eng_frame, text="aria2c 引擎（兼容性最强）",
+                       variable=self.v_engine, value="aria2",
+                       bg=BG, fg=FG, font=(FONT, 9),
+                       activebackground=BG, selectcolor="#fff").pack(side="left")
+        self._lbl(f, "默认下载引擎", 13)
+        # BT trackers 源
+        self._ent(f, self.v_bt_source, 14, 38)
+        self._lbl(f, "BT Trackers 源", 14)
+        tk.Label(f, text="每次启动时自动从此地址拉取最新 trackers", bg=BG, fg=FG_DIM,
+                 font=(FONT, 8)).grid(row=14, column=2, sticky="w", padx=(8, 0), pady=(0, 9))
+        # 自动更新开关
+        cb_bt = tk.Checkbutton(f, text="启动时自动更新 BT trackers（推荐）",
+                               variable=self.v_bt_autoupdate, bg=BG,
+                               fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
+        cb_bt.grid(row=15, column=1, sticky="w", pady=(0, 6))
+
+        # ---- 系统集成 ----
+        tk.Frame(f, bg=BORDER, height=1).grid(row=16, column=0, columnspan=3,
+                                              sticky="we", pady=(10, 8))
+        tk.Label(f, text="系统集成（让浏览器点击下载自动唤起）", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).grid(row=17, column=0, columnspan=3,
                                                sticky="w", pady=(0, 8))
         cb3 = tk.Checkbutton(f, text="开机自启（后台静默运行，不弹窗）",
                              variable=self.v_autostart, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb3.grid(row=13, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb3.grid(row=18, column=0, columnspan=2, sticky="w", pady=(0, 5))
         cb4 = tk.Checkbutton(f, text="注册 xzd:// 协议（扩展可唤起下载器）",
                              variable=self.v_protocol, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb4.grid(row=14, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb4.grid(row=19, column=0, columnspan=2, sticky="w", pady=(0, 5))
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
                                justify="left", wraplength=470)
-        self.lbl_si.grid(row=15, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.lbl_si.grid(row=20, column=0, columnspan=3, sticky="w", pady=(2, 6))
         if self.si is None:
             cb3.config(state="disabled")
             cb4.config(state="disabled")
@@ -503,10 +536,10 @@ class SettingsDialog(Dialog):
             self._refresh_si_label()
 
         tk.Label(f, text="全程离线：不检查更新、不联网校验、不上报任何数据",
-                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=15, column=0, columnspan=3,
+                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=21, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 12))
         btns = tk.Frame(f, bg=BG)
-        btns.grid(row=16, column=0, columnspan=3, sticky="e")
+        btns.grid(row=22, column=0, columnspan=3, sticky="e")
         tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
                   fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="保存", command=self._ok, font=(FONT, 10, "bold"), bg=ACCENT,
@@ -547,6 +580,10 @@ class SettingsDialog(Dialog):
             insecure=bool(self.v_insecure.get()),
             port=max(1024, min(65535, int(self.v_port.get() or 8763))),
             clipboard_watch=bool(self.v_clipboard.get()),
+            # v3.0.0: 引擎与 BT
+            engine=self.v_engine.get() or "builtin",
+            bt_tracker_source=self.v_bt_source.get().strip() or "https://cf.trackerslist.com/best.txt",
+            bt_trackers_autoupdate=bool(self.v_bt_autoupdate.get()),
         )
         # 剪贴板监听开关立即生效
         if self.app:
@@ -931,32 +968,39 @@ class App:
         inner = tk.Frame(tb, bg=CARD)
         inner.pack(fill="both", expand=True, padx=14, pady=9)
 
-        def btn(parent, text, cmd, primary=False, width=None):
-            b = tk.Button(parent, text=text, command=cmd, font=(FONT, 9),
+        def btn(parent, text, cmd, primary=False, width=None, compact=False):
+            b = tk.Button(parent, text=text, command=cmd,
+                          font=(FONT, 8 if compact else 9),
                           bg=ACCENT if primary else "#eef1f6",
                           fg="#fff" if primary else FG, relief="flat",
-                          padx=14, pady=5, cursor="hand2",
+                          padx=10 if compact else 14, pady=4 if compact else 5,
+                          cursor="hand2",
                           activebackground=ACCENT_DARK if primary else "#e2e7ee",
                           activeforeground="#fff" if primary else FG)
             if width:
                 b.config(width=width)
-            b.pack(side="left", padx=(0, 7))
+            b.pack(side="left", padx=(0, 6))
             return b
 
-        btn(inner, "+ 新建下载", self.new_download, primary=True)
-        btn(inner, "粘贴链接", self._paste_url)
-        btn(inner, "分析网页", lambda: WebScanDialog(self.root, self))
-        btn(inner, "音视频合并", lambda: MergeAVDialog(self.root, self))
-        tk.Label(inner, text="│", bg=CARD, fg=BORDER, font=(FONT, 12)).pack(side="left", padx=6)
-        btn(inner, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()))
-        btn(inner, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()))
-        btn(inner, "清除已完成", self.clear_done)
-        # v2.6.0：aria2c 备用极速通道（首页显式入口）
-        btn(inner, "⚡ aria2c 极速重试", self.retry_selected_with_aria2)
-        right = tk.Frame(inner, bg=CARD)
+        # v3.0.0：两行紧凑布局。第一行核心输入，第二行批量操作与工具
+        row1 = tk.Frame(inner, bg=CARD)
+        row1.pack(fill="x")
+        btn(row1, "+ 新建下载", self.new_download, primary=True)
+        btn(row1, "+ 新建 BT/磁力", self.new_bt_download)
+        btn(row1, "粘贴链接", self._paste_url, compact=True)
+        btn(row1, "分析网页", lambda: WebScanDialog(self.root, self), compact=True)
+        btn(row1, "音视频合并", lambda: MergeAVDialog(self.root, self), compact=True)
+
+        row2 = tk.Frame(inner, bg=CARD)
+        row2.pack(fill="x", pady=(6, 0))
+        btn(row2, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()), compact=True)
+        btn(row2, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()), compact=True)
+        btn(row2, "清除已完成", self.clear_done, compact=True)
+        btn(row2, "⚡ aria2c 重试", self.retry_selected_with_aria2, compact=True)
+        right = tk.Frame(row2, bg=CARD)
         right.pack(side="right")
-        btn(right, "设置", self._open_settings_panel)
-        btn(right, "打开目录", lambda: open_in_explorer(self.mgr.cfg.get("download_dir", "")))
+        btn(right, "设置", self._open_settings_panel, compact=True)
+        btn(right, "打开目录", lambda: open_in_explorer(self.mgr.cfg.get("download_dir", "")), compact=True)
 
         # 主体：两个标签页
         self.nb = ttk.Notebook(self.root)
@@ -1246,6 +1290,32 @@ class App:
                                   conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
                                   kind="auto")
             self.refresh_now()
+
+    def new_bt_download(self):
+        """v3.0.0：新建 BT/磁力任务。支持 magnet: URI 和本地 .torrent 文件。"""
+        # 优先尝试剪贴板里的 magnet
+        preset_url = ""
+        try:
+            clip = self.root.clipboard_get().strip()
+            if clip.startswith("magnet:") or clip.endswith(".torrent"):
+                preset_url = clip
+        except Exception:
+            pass
+        d = NewDownloadDialog(self.root, self.mgr, {"url": preset_url})
+        self.root.wait_window(d)
+        if not d.result:
+            return
+        r = d.result
+        url = r["url"].strip()
+        if not (url.startswith("magnet:") or url.endswith(".torrent") or
+                url.startswith("http") or os.path.exists(url)):
+            messagebox.showwarning("格式不对", "请粘贴 magnet:?xt=... 磁力链，或选择 .torrent 种子文件")
+            return
+        # 本地 .torrent 文件直接传路径；http(s) 种子文件 aria2c 也支持
+        self.mgr.add_task(url, out_dir=r["out_dir"], filename=r["filename"],
+                          conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
+                          kind="bt")
+        self.refresh_now()
 
     def _paste_url(self):
         try:

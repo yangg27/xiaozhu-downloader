@@ -206,8 +206,15 @@ class LocalAPI:
 
                 def add_one(item: dict, page: str = "") -> dict:
                     url = (item.get("url") or "").strip()
-                    if not url.startswith(("http://", "https://")):
+                    # v3.0.0: 接受 magnet: 与 .torrent（本地路径或 http 链接）
+                    u_lower = url.lower()
+                    is_bt = u_lower.startswith("magnet:") or u_lower.endswith(".torrent")
+                    if not (url.startswith(("http://", "https://")) or is_bt):
                         return {"ok": False, "error": "URL 无效", "url": url}
+                    # 本地 .torrent 文件路径：仅当真实存在时
+                    if is_bt and not (u_lower.startswith("magnet:") or url.startswith(("http://","https://"))):
+                        if not os.path.exists(url):
+                            return {"ok": False, "error": "种子文件不存在", "url": url}
                     referer = item.get("referer") or page or ""
                     headers = item.get("headers") or {}
                     if not isinstance(headers, dict):

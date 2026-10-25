@@ -210,6 +210,8 @@ class Aria2Bridge:
     def run(self) -> dict:
         if not is_bundled():
             return self._fail("aria2c 组件未打包（缺少 third_party/aria2/）")
+        if self._is_bt(self.url):
+            return self._run_bt()
         if self._is_hls(self.url):
             return self._run_hls()
         return self._run_http()
@@ -221,6 +223,24 @@ class Aria2Bridge:
             return p.endswith((".m3u8", ".mpd"))
         except Exception:
             return False
+
+    @staticmethod
+    def _is_bt(url: str) -> bool:
+        if not url:
+            return False
+        u = url.strip().lower()
+        if u.startswith("magnet:"):
+            return True
+        try:
+            p = urllib.parse.urlsplit(u).path
+            if p.endswith(".torrent"):
+                return True
+        except Exception:
+            pass
+        # 本地 .torrent 文件路径
+        if u.endswith(".torrent") and os.path.exists(url):
+            return True
+        return False
 
     def _fail(self, msg: str) -> dict:
         return {"ok": False, "error": msg, "path": "", "bytes": 0}
@@ -342,6 +362,162 @@ class Aria2Bridge:
             pass
         return ""
 
+    # ---- BT/磁力 via aria2c ----
+    def _run_bt(self) -> dict:
+        """BT 种子 / 磁力链下载。aria2c 原生支持，输出一个目录或单文件。"""
+        out_dir = self.out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+        # trackers 来源：实例属性（run_aria2 注入）或 headers 中的 _trackers
+        trackers = getattr(self, "trackers", None) or []
+        if not trackers and isinstance(self.headers, dict):
+            trackers = self.headers.pop("_trackers", None) or []
+
+        cmd = [
+            aria2c_exe(),
+            "--no-conf",
+            "--continue=true",
+            "--enable-dht=true",
+            "--enable-dht6=true",
+            "--enable-peer-exchange=true",
+            "--bt-enable-lpd=true",  # LSD（本地服务发现）等价开关
+            "--bt-require-crypto=false",
+            "--bt-save-metadata=true",
+            "--bt-load-saved-metadata=true",
+            "--bt-metadata-only=false",
+            "--seed-time=0",
+            "--summary-interval=1",
+            "--disk-cache=64M",
+            "--file-allocation=none",
+            "--follow-torrent=true",
+            "--follow-metalink=true",
+            "--bt-max-peers=0",
+            f"--dir={out_dir}",
+            "--show-console-readout=true",
+            "--console-log-level=notice",
+        ]
+        if trackers:
+            # tracker 选择策略：高可用知名 tracker 固定置顶 + UDP 优先 + 数量限制
+            PRIORITY_TRACKERS = [
+                "udp://tracker.opentrackr.org:1337/announce",
+                "udp://open.stealth.si:80/announce",
+                "udp://tracker.torrent.eu.org:451/announce",
+                "udp://tracker.openbittorrent.com:6969/announce",
+                "udp://exodus.desync.com:6969/announce",
+            ]
+            seen = set()
+            udp_tr = []
+            http_tr = []
+            for t in trackers:
+                t = (t or "").strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                tl = t.lower()
+                if tl.startswith("udp://"):
+                    udp_tr.append(t)
+                elif tl.startswith(("http://", "https://", "wss://", "ws://")):
+                    http_tr.append(t)
+            # 优先 tracker 置顶（如果在订阅源里没出现也强行加），然后 UDP，再 HTTP
+            tr = list(PRIORITY_TRACKERS)
+            for t in udp_tr:
+                if t not in tr:
+                    tr.append(t)
+                if len(tr) >= 14: break
+            for t in http_tr:
+                if t not in tr:
+                    tr.append(t)
+                if len(tr) >= 20: break
+            if tr:
+                cmd.append("--bt-tracker=" + ",".join(tr))
+        if self.user_agent:
+            cmd.append(f"--user-agent={self.user_agent}")
+        # BT peer 标识：使用 aria2 标准前缀，避免被反吸血/屏蔽
+        cmd.append("--peer-agent=aria2/1.37.0")
+        cmd.append("--peer-id-prefix=-AR1370-")
+        if self.proxy:
+            # BT 流量一般不走代理，但 tracker 请求走代理很有用
+            cmd.append(f"--all-proxy={self.proxy}")
+        cmd.append(self.url)
+
+        sink = ProgressSink(self.task) if self.task else None
+        t0 = time.time()
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                text=True, encoding="utf-8", errors="replace")
+            if self._proc.stdout:
+                for line in self._proc.stdout:
+                    if sink:
+                        sink.on_stdout(line)
+                    if self._stop:
+                        self._proc.terminate()
+                        return self._fail("用户取消")
+            rc = self._proc.wait()
+        except Exception as e:
+            return self._fail(f"启动 aria2c (BT) 失败：{e}")
+        elapsed = time.time() - t0
+
+        # BT 输出可能是目录或多文件；扫 out_dir 内 t0 之后的新增/修改文件
+        produced = self._collect_bt_outputs(out_dir, t0)
+        if not produced:
+            return self._fail(f"aria2c (BT) 结束但未产出文件（exit={rc}）")
+
+        # 主产物：如果只有一个，就用它；多个文件用公共顶层目录作为 path
+        if len(produced) == 1:
+            real_path = produced[0]
+        else:
+            # 找最长公共前缀目录
+            real_path = os.path.commonpath(produced) if len(produced) > 1 else produced[0]
+        try:
+            size = 0
+            for p in produced:
+                if os.path.isfile(p):
+                    size += os.path.getsize(p)
+        except Exception:
+            size = 0
+        result = {
+            "ok": True,
+            "error": "",
+            "path": real_path,
+            "bytes": size,
+            "human": _human(size),
+            "elapsed_sec": round(elapsed, 2),
+            "downloader": "aria2c-bt",
+            "files": produced,
+            "file_count": len(produced),
+        }
+        if self.task:
+            self.task.created_final = real_path
+            self.task.filename = os.path.basename(real_path)
+            self.task.size = size
+            self.task.done_bytes = size
+            self.task.progress = 1.0
+            self.task.state = "done"
+            self.task.phase = "已完成（BT/磁力）"
+        return result
+
+    @staticmethod
+    def _collect_bt_outputs(out_dir: str, since: float) -> list:
+        """收集 BT 任务在 out_dir 下 t0 之后产生/修改的所有文件（不含 .aria2 控制文件）。"""
+        produced = []
+        try:
+            for root, _, files in os.walk(out_dir):
+                for fn in files:
+                    if fn.endswith(".aria2"):
+                        continue
+                    full = os.path.join(root, fn)
+                    try:
+                        if os.path.getmtime(full) >= since - 2:
+                            produced.append(full)
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+        produced.sort()
+        return produced
+
     # ---- HLS via N_m3u8DL-RE ----
     def _run_hls(self) -> dict:
         out_dir = self.out_dir
@@ -440,10 +616,13 @@ class Aria2Bridge:
 def run_aria2(url: str, out_dir: str, filename: str = "", *,
               referer: str = "", cookie: str = "", headers: dict | None = None,
               user_agent: str = "", proxy: str = "", connections: int = 16,
+              trackers: list | None = None,
               task=None) -> dict:
-    """一键调用 aria2c 备用通道；不依赖外部安装。"""
+    """一键调用 aria2c 备用通道；不依赖外部安装。trackers 用于 BT/磁力。"""
     bridge = Aria2Bridge(url, out_dir, filename=filename,
                          referer=referer, cookie=cookie, headers=headers,
                          user_agent=user_agent, proxy=proxy,
                          connections=connections, task=task)
+    if trackers:
+        bridge.trackers = list(trackers)
     return bridge.run()
