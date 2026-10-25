@@ -44,9 +44,15 @@ UA = (
 # 路径/环境
 # ---------------------------------------------------------------------------
 def _app_root() -> str:
-    """与 dlcore.app_root() 保持一致，但避免必须 import dlcore。"""
+    """应用根目录。frozen 时返回 _internal（资源都在那），否则返回脚本所在目录。"""
     if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
+        # PyInstaller one-dir：sys.executable 在 <root>/小助下载器.exe，
+        # 数据资源（含 third_party）在 <root>/_internal/ 下
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        internal = os.path.join(exe_dir, "_internal")
+        if os.path.isdir(internal):
+            return internal
+        return exe_dir
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -377,6 +383,8 @@ class Aria2Bridge:
             aria2c_exe(),
             "--no-conf",
             "--continue=true",
+            "--auto-file-renaming=true",  # BT 文件已存在时自动加 (1) 后缀
+            "--allow-overwrite=true",     # 配合 continue=true：已有 .aria2 控制文件时续传
             "--enable-dht=true",
             "--enable-dht6=true",
             "--enable-peer-exchange=true",

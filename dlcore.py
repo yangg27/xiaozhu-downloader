@@ -174,10 +174,14 @@ def is_frozen() -> bool:
 def app_root() -> str:
     """程序资源所在目录。
     · 源码运行：本文件所在目录
-    · 冻结运行：exe 所在目录（resources 已随 exe 同级展开）
+    · 冻结运行（PyInstaller one-dir）：exe 同级的 _internal/（资源都在那）
     """
     if is_frozen():
-        return os.path.dirname(os.path.abspath(sys.executable))
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        internal = os.path.join(exe_dir, "_internal")
+        if os.path.isdir(internal):
+            return internal
+        return exe_dir
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -3243,6 +3247,9 @@ class Manager:
                         "referer": t.http.referer, "group": t.group,
                         "added_at": t.added_at, "speed_limit": t.speed_limit,
                         "size": t.size,
+                        # v3.0.0: 保存 err/phase 便于排错
+                        "err": t.err or "",
+                        "phase": t.phase or "",
                     })
                 tmp = self.jobs_path() + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
