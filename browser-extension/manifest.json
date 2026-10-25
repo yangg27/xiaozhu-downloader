@@ -13,6 +13,9 @@
     "scripting",
     "notifications"
   ],
+  "optional_permissions": [
+    "downloads.open"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],

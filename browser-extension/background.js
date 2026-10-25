@@ -33,7 +33,9 @@ const state = {
   token: '',
   port: DEFAULT_PORT,
   connected: false,
-  takeover: 'all'       // off | media | all —— 接管浏览器下载的模式（默认全部接管）
+  takeover: 'all',      // off | media | all —— 接管浏览器下载的模式（默认全部接管）
+  tasks: [],            // 当前活动任务快照（popup 轮询展示）
+  history: []           // 已完成下载记录（popup 展示 + 右键打开）
 };
 
 // ------------------------- 持久化 -------------------------
@@ -220,16 +222,31 @@ async function probePort() {
 
 async function ensureToken() {
   if (state.token) {
-    // 校验令牌是否仍有效
+    // 校验令牌是否仍有效，同时刷新活动任务列表
     try {
       const r = await fetch(`http://127.0.0.1:${state.port}/status`, {
         headers: { 'X-XZD-Token': state.token }
       });
-      if (r.ok) { state.connected = true; return true; }
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        state.tasks = j.tasks || [];
+        state.connected = true;
+        return true;
+      }
     } catch (e) { /* 端口可能变了 */ }
     state.token = '';
   }
   return await probePort();
+}
+
+async function fetchHistory(limit = 100) {
+  const ok = await ensureToken();
+  if (!ok) { state.history = []; return; }
+  try {
+    const r = await fetch(`http://127.0.0.1:${state.port}/history?limit=${limit}&token=${state.token}`);
+    const j = await r.json().catch(() => ({}));
+    state.history = j.items || [];
+  } catch (e) { state.history = []; }
 }
 
 async function sendToDownloader(payload) {
@@ -266,7 +283,35 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const store = state.byTab[tabId] || { items: [], page: '' };
         const ok = await ensureToken();
         reply({ ok: true, items: store.items, page: store.page,
-                connected: ok, port: state.port });
+                connected: ok, port: state.port, tasks: state.tasks });
+        break;
+      }
+      case 'getTasks': {
+        const ok = await ensureToken();
+        reply({ ok: true, connected: ok, port: state.port, tasks: state.tasks });
+        break;
+      }
+      case 'getHistory': {
+        await fetchHistory(msg.limit || 100);
+        reply({ ok: true, items: state.history });
+        break;
+      }
+      case 'openFile': {
+        const tid = msg.tid || '';
+        const mode = msg.mode || 'file';   // file | folder
+        const ok = await ensureToken();
+        if (!ok) { reply({ ok: false, error: '未连接下载器' }); break; }
+        try {
+          const r = await fetch(`http://127.0.0.1:${state.port}/open`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
+            body: JSON.stringify({ tid, mode })
+          });
+          const j = await r.json().catch(() => ({}));
+          reply(j);
+        } catch (e) {
+          reply({ ok: false, error: e.message });
+        }
         break;
       }
       case 'addFound': {   // 内容脚本发现的媒体（js 里拼接的地址等）
@@ -542,6 +587,24 @@ chrome.runtime.onInstalled.addListener(() => {
       title: '用小助下载器下载此视频',
       contexts: ['video', 'audio']
     });
+    // 下载历史记录右键菜单（父菜单）
+    chrome.contextMenus.create({
+      id: 'xzd-history',
+      title: '小助下载器下载记录',
+      contexts: ['action']
+    });
+    chrome.contextMenus.create({
+      id: 'xzd-history-open',
+      parentId: 'xzd-history',
+      title: '打开最近的下载文件',
+      contexts: ['action']
+    });
+    chrome.contextMenus.create({
+      id: 'xzd-history-folder',
+      parentId: 'xzd-history',
+      title: '打开文件所在目录',
+      contexts: ['action']
+    });
   });
   loadState();
 });
@@ -566,6 +629,27 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       for (const it of r.items.slice(0, 30)) {
         record(tab.id, it.url, { type: it.type, filename: it.filename, from: 'scan' });
       }
+    }
+  } else if (info.menuItemId === 'xzd-history-open' || info.menuItemId === 'xzd-history-folder') {
+    await fetchHistory(1);
+    const it = state.history[0];
+    if (!it) {
+      notifyUser('没有下载记录', '尚未完成过任何下载');
+      return;
+    }
+    const mode = info.menuItemId === 'xzd-history-open' ? 'file' : 'folder';
+    const r = await ensureToken();
+    if (!r) { notifyUser('未连接', '请启动小助下载器'); return; }
+    try {
+      const resp = await fetch(`http://127.0.0.1:${state.port}/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
+        body: JSON.stringify({ tid: it.tid, mode })
+      });
+      const j = await resp.json().catch(() => ({}));
+      notifyUser(j.ok ? '已打开' : '打开失败', j.ok ? it.filename : (j.error || '未知错误'));
+    } catch (e) {
+      notifyUser('打开失败', e.message);
     }
   }
 });

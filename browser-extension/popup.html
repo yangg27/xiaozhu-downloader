@@ -5,7 +5,7 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    width: 400px; max-height: 560px; background: #fff; color: #1f2329;
+    width: 420px; max-height: 580px; background: #fff; color: #1f2329;
     font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
     font-size: 13px; display: flex; flex-direction: column;
   }
@@ -27,7 +27,7 @@
   .status { padding: 9px 13px; font-size: 12px; color: #7a828e; border-bottom: 1px solid #f0f2f5; }
   .status.warn { color: #d93025; }
   .status.ok { color: #0f9d58; }
-  .list { overflow-y: auto; flex: 1; max-height: 400px; }
+  .list { overflow-y: auto; flex: 1; max-height: 360px; }
   .row {
     display: flex; align-items: center; gap: 8px; padding: 8px 13px;
     border-bottom: 1px solid #f5f6f8;
@@ -63,11 +63,31 @@
   .takeover select:hover { border-color: #2f6fed; }
   .wake { padding: 8px 13px 10px; border-bottom: 1px solid #f0f2f5; }
   .wake button { width: 100%; padding: 7px 11px; font-size: 12.5px; }
+  .tabs { display: flex; border-bottom: 1px solid #e3e6eb; background: #fafbfc; }
+  .tabs button {
+    flex: 1; border-radius: 0; background: transparent; padding: 8px 0;
+    font-size: 12px; color: #7a828e;
+  }
+  .tabs button.active { color: #1f2329; background: #fff; border-bottom: 2px solid #2f6fed; }
+  .progress-wrap { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .progress-bar {
+    height: 5px; background: #e3e6eb; border-radius: 3px; overflow: hidden;
+  }
+  .progress-bar > div { height: 100%; background: #2f6fed; width: 0%; }
+  .progress-bar > div.done { background: #0f9d58; }
+  .progress-bar > div.err { background: #d93025; }
+  .meta { font-size: 11px; color: #7a828e; }
+  .state { font-size: 10.5px; padding: 1px 5px; border-radius: 4px; background: #eef1f6; color: #5a6472; }
+  .state.done { background: #e8f7ee; color: #0f9d58; }
+  .state.err { background: #fce8e6; color: #d93025; }
+  .row.task { align-items: stretch; }
+  .acts-hist { display: flex; gap: 5px; }
+  .acts-hist button { padding: 3px 8px; font-size: 11px; }
 </style>
 </head>
 <body>
   <div class="head">
-    <div class="title">本页媒体 <span id="count"></span></div>
+    <div class="title">小助下载器 <span id="count"></span></div>
     <div class="acts">
       <button class="mini" id="btn-scan">分析页面</button>
       <button class="mini" id="btn-clear">清空</button>
@@ -76,6 +96,11 @@
   <div class="status" id="status">正在检测下载器…</div>
   <div class="wake" id="wake-row" style="display:none">
     <button class="primary" id="btn-wake" style="width:100%">启动小助下载器</button>
+  </div>
+  <div class="tabs">
+    <button class="active" data-tab="media">本页媒体</button>
+    <button data-tab="tasks">下载中</button>
+    <button data-tab="history">已完成</button>
   </div>
   <div class="list" id="list"></div>
   <div class="foot">

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.6.1
+小助下载器 · 图形界面  gui.py   v2.6.2
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -1911,9 +1911,14 @@ class App:
                 continue
 
     def _clipboard_poll(self):
-        """主线程：读取剪贴板，发现新 URL 且未在下载列表中则弹新建下载。"""
+        """主线程：读取剪贴板，发现新 URL 且未在下载列表中则弹新建下载。
+
+        去重规则：同一 URL 只有在已存在“未完成 / 下载中 / 等待中 / 已暂停”
+        任务时才跳过；已取消/已失败/已完成的 URL 再次复制仍会触发弹窗，
+        让用户重新确认是否下载。
+        """
         import re
-        url_re = re.compile(r"^https?://", re.I)
+        url_re = re.compile(r"^https?://|magnet:\?", re.I)
         try:
             txt = self.root.clipboard_get().strip()
         except Exception:
@@ -1923,18 +1928,26 @@ class App:
         self._clip_last = txt
         if not url_re.match(txt):
             return
-        for s in self.mgr.snapshots():
-            if s.get("url") == txt and s.get("state") not in (dlcore.STATE_DONE, dlcore.STATE_CANCELLED, dlcore.STATE_ERROR):
-                return
-        self.new_download({"url": txt})
+        if self._clip_url_already_active(txt):
+            return
+        self._on_clip_url(txt)
 
     def _on_clip_url(self, url: str):
         """剪贴板发现 URL，弹新建下载（自动填好链接）。"""
-        # 已在下载列表里的不重复弹
-        for s in self.mgr.snapshots():
-            if s.get("url") == url and s.get("state") not in (dlcore.STATE_DONE, dlcore.STATE_CANCELLED, dlcore.STATE_ERROR):
-                return
+        if self._clip_url_already_active(url):
+            return
         self.new_download({"url": url})
+
+    def _clip_url_already_active(self, url: str) -> bool:
+        """URL 是否已存在未完成的任务（下载中/等待/暂停/准备中）。"""
+        active_states = {
+            dlcore.STATE_PENDING, dlcore.STATE_WAIT,
+            dlcore.STATE_DOWNLOADING, dlcore.STATE_PAUSED,
+        }
+        for s in self.mgr.snapshots():
+            if s.get("url") == url and s.get("state") in active_states:
+                return True
+        return False
 
 
 def _safe_console(msg: str):

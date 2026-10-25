@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.0.5"
+ENGINE_VERSION = "3.0.7"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -3051,6 +3051,10 @@ class Manager:
         self._lock = threading.RLock()
         self._cv = threading.Condition()
         self._slot_holders: set[str] = set()
+        # v3.0.7: 浏览器扩展下载记录（内存 + 持久化到 history.json）
+        self._history: list[dict] = []
+        self._history_path = os.path.join(self.data_dir, "history.json")
+        self._load_history()
         # v3.0.0: 启动时后台更新 BT trackers（不阻塞 GUI）
         if self.cfg.get("bt_trackers_autoupdate", True):
             try:
@@ -3132,6 +3136,17 @@ class Manager:
     def on_task_end(self, task: DownloadTask):
         self.release_slot(task)
         self.save_jobs()
+        # v3.0.7: 完成任务记录到扩展历史（保留最近 200 条）
+        if task.state == STATE_DONE and task.created_final:
+            self._add_history({
+                "tid": task.tid,
+                "url": task.url,
+                "filename": task.filename,
+                "final": task.created_final,
+                "out_dir": task.out_dir,
+                "size": task.size,
+                "done_at": now(),
+            })
         self.notify()
 
     # ---- 任务 ----
@@ -3280,6 +3295,35 @@ class Manager:
 
     def total_speed(self) -> float:
         return sum(t.speed for t in self.tasks.values())
+
+    # ---- 扩展下载记录 ----
+    def _load_history(self):
+        try:
+            with open(self._history_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or []
+                if isinstance(data, list):
+                    self._history = data[-200:]
+        except FileNotFoundError:
+            self._history = []
+        except Exception:
+            self._history = []
+
+    def _add_history(self, record: dict):
+        with self._lock:
+            self._history.append(record)
+            if len(self._history) > 200:
+                self._history = self._history[-200:]
+            try:
+                tmp = self._history_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self._history, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self._history_path)
+            except Exception:
+                pass
+
+    def history(self, limit: int = 100) -> list[dict]:
+        with self._lock:
+            return list(self._history[-max(1, limit):])
 
     # ---- 持久化 ----
     def save_jobs(self):

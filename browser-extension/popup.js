@@ -1,8 +1,12 @@
-/** 小助下载器 · 扩展弹窗逻辑 */
+/** 小助下载器 · 扩展弹窗逻辑（v3.0.7） */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
 let currentTab = null;
+let currentTabItems = [];
+let currentTasks = [];
+let currentHistory = [];
+let activeTab = 'media';
 
 function fmtSize(n) {
   if (!n) return '';
@@ -12,9 +16,28 @@ function fmtSize(n) {
   return n.toFixed(1) + ' ' + u[i];
 }
 
+function fmtSpeed(n) {
+  if (!n) return '';
+  return fmtSize(n) + '/s';
+}
+
 function tagOf(type) {
   return type === 'hls' ? 'HLS' : type === 'video' ? '视频'
     : type === 'audio' ? '音频' : type === 'file' ? '文件' : '媒体';
+}
+
+function stateClass(state) {
+  if (state === 'done') return 'done';
+  if (state === 'error') return 'err';
+  return '';
+}
+
+function stateText(state) {
+  const map = {
+    pending: '准备中', waiting: '排队中', downloading: '下载中',
+    paused: '已暂停', done: '已完成', error: '出错', cancelled: '已取消'
+  };
+  return map[state] || state;
 }
 
 async function send(msg) {
@@ -25,17 +48,27 @@ async function send(msg) {
   });
 }
 
-function render(res) {
-  const status = $('status');
-  const list = $('list');
-  if (!res || !res.ok) {
-    status.textContent = '读取失败';
-    status.className = 'status warn';
-    return;
+function setTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.tabs button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tab === name);
+  });
+  const foot = $('foot');
+  const btnAll = $('btn-all');
+  const hint = $('hint');
+  if (name === 'media') {
+    btnAll.style.display = '';
+    hint.textContent = '嗅探到的媒体均可直接下载';
+  } else {
+    btnAll.style.display = 'none';
+    hint.textContent = name === 'tasks' ? '点击任务可查看详情' : '右键扩展图标可打开最近文件/目录';
   }
-  const items = res.items || [];
-  $('count').textContent = items.length ? `（${items.length}）` : '';
-  if (res.connected) {
+  render();
+}
+
+function renderStatus(res) {
+  const status = $('status');
+  if (res && res.connected) {
     status.textContent = `已连接下载器 · 127.0.0.1:${res.port}`;
     status.className = 'status ok';
     const wr = $('wake-row');
@@ -46,10 +79,27 @@ function render(res) {
     const wr = $('wake-row');
     if (wr) wr.style.display = 'block';
   }
+}
+
+function render() {
+  const list = $('list');
   list.innerHTML = '';
+  $('count').textContent = '';
+
+  if (activeTab === 'media') {
+    renderMedia(list);
+  } else if (activeTab === 'tasks') {
+    renderTasks(list);
+  } else {
+    renderHistory(list);
+  }
+}
+
+function renderMedia(list) {
+  const items = currentTabItems || [];
+  $('count').textContent = items.length ? `（${items.length}）` : '';
   if (!items.length) {
-    list.innerHTML = '<div class="empty">暂未嗅探到媒体<br>' +
-      '<span>播放一下视频，或点上方「分析页面」</span></div>';
+    list.innerHTML = '<div class="empty">暂未嗅探到媒体<br><span>播放一下视频，或点上方「分析页面」</span></div>';
     return;
   }
   items.forEach((it) => {
@@ -91,12 +141,127 @@ function render(res) {
   });
 }
 
-async function refresh() {
+function renderTasks(list) {
+  const tasks = currentTasks || [];
+  $('count').textContent = tasks.length ? `（${tasks.length}）` : '';
+  if (!tasks.length) {
+    list.innerHTML = '<div class="empty">暂无活动下载任务<br><span>在网页中点击下载或复制链接即可开始</span></div>';
+    return;
+  }
+  tasks.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'row task';
+    const st = document.createElement('span');
+    st.className = 'state ' + stateClass(t.state);
+    st.textContent = t.state_cn || stateText(t.state);
+    const wrap = document.createElement('div');
+    wrap.className = 'progress-wrap';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = t.filename || t.url || '未知文件';
+    name.title = t.err || '';
+    const barWrap = document.createElement('div');
+    barWrap.className = 'progress-bar';
+    const bar = document.createElement('div');
+    bar.className = stateClass(t.state);
+    bar.style.width = Math.max(0, Math.min(100, (t.progress || 0) * 100)) + '%';
+    barWrap.appendChild(bar);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const parts = [];
+    if (t.size) parts.push(fmtSize(t.size));
+    if (t.speed) parts.push(fmtSpeed(t.speed));
+    if (t.eta) parts.push('约' + t.eta);
+    if (t.phase && t.state === 'downloading') parts.push(t.phase);
+    meta.textContent = parts.join(' · ');
+    wrap.append(name, barWrap, meta);
+    row.append(st, wrap);
+    list.appendChild(row);
+  });
+}
+
+function renderHistory(list) {
+  const items = currentHistory || [];
+  $('count').textContent = items.length ? `（${items.length}）` : '';
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">暂无已完成记录<br><span>下载完成后会自动出现在这里</span></div>';
+    return;
+  }
+  items.slice().reverse().forEach((it) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const tag = document.createElement('span');
+    tag.className = 'tag done';
+    tag.textContent = '完成';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = it.filename || it.url;
+    name.title = it.url;
+    const size = document.createElement('span');
+    size.className = 'size';
+    size.textContent = fmtSize(it.size);
+    const acts = document.createElement('div');
+    acts.className = 'acts-hist';
+    const btnOpen = document.createElement('button');
+    btnOpen.textContent = '打开';
+    btnOpen.addEventListener('click', async () => {
+      const r = await send({ cmd: 'openFile', tid: it.tid, mode: 'file' });
+      $('hint').textContent = r && r.ok ? '已打开文件' : ('打开失败：' + ((r && r.error) || '未知'));
+    });
+    const btnDir = document.createElement('button');
+    btnDir.textContent = '目录';
+    btnDir.addEventListener('click', async () => {
+      const r = await send({ cmd: 'openFile', tid: it.tid, mode: 'folder' });
+      $('hint').textContent = r && r.ok ? '已打开目录' : ('打开失败：' + ((r && r.error) || '未知'));
+    });
+    acts.append(btnOpen, btnDir);
+    row.append(tag, name, size, acts);
+    list.appendChild(row);
+  });
+}
+
+async function refreshMedia() {
   const res = await send({ cmd: 'getItems', tabId: currentTab ? currentTab.id : null });
-  render(res);
+  if (res && res.ok) {
+    currentTabItems = res.items || [];
+    currentTasks = res.tasks || [];
+    renderStatus(res);
+  }
+}
+
+async function refreshTasks() {
+  const res = await send({ cmd: 'getTasks' });
+  if (res && res.ok) {
+    currentTasks = res.tasks || [];
+    renderStatus(res);
+  }
+}
+
+async function refreshHistory() {
+  const res = await send({ cmd: 'getHistory', limit: 100 });
+  if (res && res.ok) {
+    currentHistory = res.items || [];
+  }
+}
+
+async function refresh() {
+  if (activeTab === 'media') await refreshMedia();
+  else if (activeTab === 'tasks') await refreshTasks();
+  else await refreshHistory();
+  render();
+}
+
+function setupTabs() {
+  document.querySelectorAll('.tabs button').forEach((b) => {
+    b.addEventListener('click', () => {
+      setTab(b.dataset.tab);
+      refresh();
+    });
+  });
 }
 
 function setup() {
+  setupTabs();
   $('btn-scan').addEventListener('click', async () => {
     $('status').textContent = '正在分析页面…';
     $('status').className = 'status';
@@ -113,8 +278,7 @@ function setup() {
     refresh();
   });
   $('btn-all').addEventListener('click', async () => {
-    const res = await send({ cmd: 'getItems', tabId: currentTab ? currentTab.id : null });
-    const items = (res && res.items) || [];
+    const items = currentTabItems || [];
     if (!items.length) { $('hint').textContent = '没有可下载的媒体'; return; }
     const payload = items.map((it) => ({
       url: it.url, filename: it.filename,
@@ -149,7 +313,7 @@ function setup() {
         await refresh();
       } else {
         $('hint').textContent = '启动失败：' + ((r && r.error) || '未知') +
-          '（请手动双击「启动下载器.bat」）';
+          '（请手动打开小助下载器）';
       }
       wk.textContent = '启动小助下载器';
       wk.disabled = false;
@@ -161,13 +325,14 @@ async function boot() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTab = tabs && tabs[0] ? tabs[0] : null;
   setup();
-  // 读取接管模式
   const st = await send({ cmd: 'getSettings' });
   if (st && st.ok) {
     const sel = $('takeover');
-    if (sel) sel.value = st.takeover || 'media';
+    if (sel) sel.value = st.takeover || 'all';
   }
   await refresh();
+  // 自动轮询，让下载进度实时更新
+  setInterval(() => { if (activeTab !== 'media') refresh(); }, 1200);
 }
 
 document.addEventListener('DOMContentLoaded', boot);

@@ -154,10 +154,18 @@ class LocalAPI:
                         "ok": True,
                         "tasks": [{"tid": s["tid"], "filename": s["filename"],
                                    "state": s["state"], "state_cn": s["state_cn"],
-                                   "progress": s["progress"], "speed": s["speed"]}
+                                   "progress": s["progress"], "speed": s["speed"],
+                                   "size": s["size"], "done_bytes": s["done_bytes"],
+                                   "eta": s["eta"], "phase": s["phase"], "err": s["err"]}
                                   for s in snap],
                         "total_speed": api.mgr.total_speed(),
                     })
+                if path == "/history":
+                    if not self._token_ok():
+                        return self._json({"ok": False, "error": "令牌无效"}, 401)
+                    q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    limit = int((q.get("limit") or ["100"])[0])
+                    return self._json({"ok": True, "items": api.mgr.history(limit=limit)})
                 if path == "/sniff":
                     if not self._token_ok():
                         return self._json({"ok": False, "error": "令牌无效"}, 401)
@@ -252,6 +260,27 @@ class LocalAPI:
                     page = body.get("page") or ""
                     n = api.mgr.add_sniff_items(page, items)
                     return self._json({"ok": True, "added": n})
+                if path == "/open":
+                    # 扩展请求：打开已完成任务的文件或所在目录
+                    tid = body.get("tid") or ""
+                    mode = body.get("mode") or "file"   # file | folder
+                    task = api.mgr.get(tid)
+                    if not task:
+                        return self._json({"ok": False, "error": "任务不存在"}, 404)
+                    target = task.created_final or task.final_path()
+                    if not target or not os.path.exists(target):
+                        return self._json({"ok": False, "error": "文件不存在"}, 404)
+                    try:
+                        if mode == "folder":
+                            d = os.path.dirname(target)
+                            subprocess.Popen(["explorer", "/select,", os.path.normpath(target)],
+                                             creationflags=subprocess.CREATE_NO_WINDOW)
+                            return self._json({"ok": True, "opened": d})
+                        else:
+                            os.startfile(target)  # noqa
+                            return self._json({"ok": True, "opened": target})
+                    except Exception as e:
+                        return self._json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
                 return self._json({"ok": False, "error": "未知接口"}, 404)
 
         # 只绑定 127.0.0.1
