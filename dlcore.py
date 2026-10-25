@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.8"
+ENGINE_VERSION = "3.1.9"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1314,7 +1314,17 @@ class FileDownload(DownloadTask):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.kind = "file"
-        self._target_lock = threading.Lock()   # 保护 target 的动态调整
+        # ★ v3.1.9 严重缺陷修复：必须是 RLock，不能是普通 Lock。
+        #   死锁现场（实测抓到线程堆栈）：
+        #     set_target_conns() 持有 _target_lock → 调 _spawn_workers()
+        #     → _spawn_workers 再次 `with self._target_lock` → **同线程自锁**
+        #   后果（用户可见的全部症状）：
+        #     · 该线程原本还持有 Manager._lock（_rebalance_targets 里拿的），
+        #       自锁后**永不释放** → 所有 snapshots() 永久挂起
+        #       → GUI 刷新卡死、/status 无响应、扩展列表空、点「打开/目录」无反应；
+        #     · release_slot() 也要 Manager._cv，同样被拖死 → 下载彻底停摆。
+        #   `_lock` 是 RLock 却漏了这个兄弟锁，属实现疏漏。
+        self._target_lock = threading.RLock()   # 保护 target 的动态调整
         self.bitmap: bytearray | None = None
         self.nblocks = 0
         self.block_size = BLOCK_SIZE
@@ -1741,7 +1751,17 @@ class FileDownload(DownloadTask):
             return self.target
         if self.state == STATE_PAUSED:
             return 0
-        return sum(1 for t in self._workers if t.is_alive())
+        # ★ v3.1.9 性能：加 0.5 秒缓存。
+        #   本方法被 snapshot() 高频调用（GUI 600ms 一轮 + 扩展 1.2s 一轮），
+        #   而每次都要对最多 32 个线程调 is_alive() —— 那会抢 CPython 内部
+        #   线程状态锁，与正在 t.start() 的 _spawn_workers 激烈争抢
+        #   （实测把 snapshots() 拖到 3.8 秒）。线程数的展示精度到秒足够。
+        _n = now()
+        if _n - getattr(self, "_ac_t", 0.0) < 0.5 and hasattr(self, "_ac_v"):
+            return self._ac_v
+        self._ac_t = _n
+        self._ac_v = sum(1 for t in self._workers if t.is_alive())
+        return self._ac_v
 
     def target_conns(self) -> int:
         with self._target_lock:
@@ -3142,6 +3162,24 @@ DEFAULT_CFG = {
 }
 
 
+def _dedupe_snaps(snaps: list[dict]) -> list[dict]:
+    """按 tid 去重（保序）。
+
+    v3.1.9 引入：order 里若残留重复 tid，snapshots() 会返回重复条目，
+    下游 GUI 的 `tree.insert(iid=tid)` 会抛 TclError 打死主线程、
+    localserver 的 /status 也会让扩展拿到重复行。此处兜底。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for s in snaps:
+        tid = s.get("tid")
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(s)
+    return out
+
+
 class Manager:
     def __init__(self, data_dir: str | None = None, on_notify=None,
                  on_task_done=None):
@@ -3157,6 +3195,8 @@ class Manager:
         self._lock = threading.RLock()
         self._cv = threading.Condition()
         self._slot_holders: set[str] = set()
+        # v3.1.9: 僵尸巡检的上次时间戳（节流用，见 _reap_dead_tasks）
+        self._zombie_probe_t: float = 0.0
         # v3.0.8: waiting 任务开始等待的时间戳，用于公平槽位调度
         self._slot_wait_start: dict[str, float] = {}
         # v3.0.7: 浏览器扩展下载记录（内存 + 持久化到 history.json）
@@ -3223,6 +3263,10 @@ class Manager:
 
     # ---- 并发槽位 ----
     def acquire_slot(self, task: DownloadTask) -> bool:
+        # ★ v3.1.9：本函数在 _cv 临界区里**只做状态判断与占位**，
+        #   绝不在持锁时启线程（详见函数内两处 need_rebalance 注释）。
+        need_rebalance = False          # 占位成功 → 出了 with 做一次重平衡
+        got = False
         with self._cv:
             while True:
                 if task._stop or task.state == STATE_CANCELLED:
@@ -3267,12 +3311,15 @@ class Manager:
                     self._slot_holders.add(task.tid)
                     task._slot_since = time.time()
                     self._slot_wait_start.pop(task.tid, None)
-                    # 获得槽位后重新平衡所有活动任务的线程数
-                    try:
-                        self._rebalance_targets()
-                    except Exception:
-                        LOG.debug('忽略异常：_rebalance_targets()')
-                    return True
+                    # ★ v3.1.9 修复：这里**不能**在持 _cv 的状态下调
+                    #   _rebalance_targets —— 它会拿 Manager._lock 并真正
+                    #   启线程（可能阻塞）。一旦阻塞，_cv 被长期占着，
+                    #   release_slot / acquire_slot 全排队，下载与接口一起卡死
+                    #   （实测堆栈里 release_slot 正卡在 _cv.__enter__）。
+                    #   改为置标志，出了 with 再重平衡。
+                    need_rebalance = True
+                    got = True
+                    break
                 # v3.1.8 修复：插队任务优先 —— 只要有空位就先给 _priority 任务，
                 # 不受"等待最久者优先"约束（否则普通任务会抢走插队任务的空位，
                 # 实测 jump_queue 后插队任务一直停在 waiting）。
@@ -3290,11 +3337,10 @@ class Manager:
                         self._slot_holders.add(task.tid)
                         task._slot_since = time.time()
                         self._slot_wait_start.pop(task.tid, None)
-                        try:
-                            self._rebalance_targets()
-                        except Exception:
-                            LOG.debug('忽略异常：_rebalance_targets()')
-                        return True
+                        # 同 3298 行：置标志，出了 with 再重平衡（避免锁嵌套）
+                        need_rebalance = True
+                        got = True
+                        break
                 else:
                     # ★ v3.1.8 严重缺陷修复（实测插队成功率仅 3/6）：
                     #   普通任务在下面"等待最久者优先"逻辑里会抢先占位 ——
@@ -3333,11 +3379,21 @@ class Manager:
                     if len(self._slot_holders) < max_slots:
                         self._slot_holders.add(task.tid)
                         self._slot_wait_start.pop(task.tid, None)
-                        return True
+                        need_rebalance = True
+                        got = True
+                        break
                 if task.state == STATE_PAUSED:
                     self._slot_wait_start.pop(task.tid, None)
                     return False
                 self._cv.wait(timeout=0.5)
+
+        # ---- 出了 _cv 才做重平衡（会拿 Manager._lock 并可能启线程）----
+        if need_rebalance:
+            try:
+                self._rebalance_targets()
+            except Exception:
+                LOG.debug('忽略异常：_rebalance_targets()')
+        return got
 
     def release_slot(self, task: DownloadTask):
         with self._cv:
@@ -3414,9 +3470,20 @@ class Manager:
         task._priority = bool(priority)
         with self._lock:
             self.tasks[task.tid] = task
-            if priority:
+            # ★ v3.1.9 严重缺陷修复：order 必须防重。
+            #   tid 由 md5(url|now()) 生成，两次 add 落在同一微秒时（本地环回
+            #   下载极快、扩展/协议同时触发）会得到**完全相同**的 tid。
+            #   此前无脑 insert → order 里出现两条同一 tid →
+            #   ① snapshots() 返回重复条目 → GUI tree.insert 抛
+            #      TclError: Item xxx already exists → **主线程崩溃、进程直接退出**
+            #      （用户视角：界面突然消失、浏览器扩展点「打开/目录」毫无反应）
+            #   ② save_jobs() 把重复写进 jobs.json，重启 load_jobs 再叠加一次，
+            #      越滚越多，形成不可自愈的恶性循环。
+            #   这里保证同一 tid 在 order 中最多出现一次。
+            if task.tid not in self.order:
                 self.order.insert(0, task.tid)
             else:
+                self.order.remove(task.tid)
                 self.order.insert(0, task.tid)
         task.state = STATE_WAIT
         t = threading.Thread(target=task.run, daemon=True, name=f"xzd-{task.tid}")
@@ -3551,14 +3618,26 @@ class Manager:
         return min(task.requested_conns, fair)
 
     def _rebalance_targets(self):
-        """重新计算所有下载中/等待中任务的目标线程数，并应用。"""
+        """重新计算所有下载中/等待中任务的目标线程数，并应用。
+
+        ★ v3.1.9 修复：**绝不能在持有 self._lock 期间调用 set_target_conns**。
+          set_target_conns → _spawn_workers 会真正创建并启动线程（慢且可能
+          阻塞在 _target_lock 上）；一旦阻塞，Manager._lock 被长期占着，
+          所有 snapshots() / release_slot() 全部排队等待 —— 界面与接口
+          整片卡死（实测：/ping 正常、/status 100% 超时，正是这个特征）。
+          这里先"持锁取快照"，再"放锁做应用"，锁窗口从"整段"缩到"读一次"。
+        """
         with self._lock:
             active = [t for t in self.tasks.values()
                       if t.state in (STATE_DOWNLOADING, STATE_WAIT, STATE_PENDING)]
             active.sort(key=lambda t: getattr(t, '_slot_since', t.added_at))
-        for t in active:
-            fair = self.fair_target_conns(t)
-            t.set_target_conns(fair)
+        for t in active:                     # ← 已释放 _lock
+            try:
+                fair = self.fair_target_conns(t)
+                t.set_target_conns(fair)
+            except Exception:
+                LOG.debug("忽略异常：_rebalance_targets 应用目标线程数 tid=%s",
+                          getattr(t, "tid", "?"))
 
     def add_connections(self, task: DownloadTask, k: int = 8) -> bool:
         if not isinstance(task, FileDownload) or task.state != STATE_DOWNLOADING:
@@ -3606,12 +3685,23 @@ class Manager:
     def snapshots(self) -> list[dict]:
         with self._lock:
             snaps = [self.tasks[tid].snapshot() for tid in self.order if tid in self.tasks]
+        # ★ v3.1.9 防御：order 理论上不该有重复 tid（add_task 已防重），
+        #   但旧版本写坏的 jobs.json 被 load_jobs 读进来时仍可能出现。
+        #   这里做最后一道去重，确保 GUI / 接口拿到的快照**永不重复** ——
+        #   GUI 的 tree.insert(iid=tid) 遇到重复会抛 TclError 打死主线程。
+        snaps = _dedupe_snaps(snaps)
         self._reap_dead_tasks(snaps)
         return snaps
 
     # 僵尸判定：连续多少次巡检发现"线程已死但状态仍是活动态"才动手
     # （取 3 是为了容忍"线程刚提交完最后一笔状态、尚未退出"的极短窗口）
     ZOMBIE_STRIKES = 3
+    # ★ v3.1.9 性能：僵尸巡检节流间隔（秒）。
+    #   th.is_alive() 要抢 CPython 内部线程状态锁，而 _spawn_workers 正在
+    #   大量 t.start() —— 多任务并发时实测 snapshots() 会被拖到 3.8 秒。
+    #   僵尸本就是"线程死了却没更新状态"的罕见情形，晚一两秒发现毫无影响，
+    #   因此降到最多每 1.5 秒巡检一次（GUI 每 600ms 刷一次，≈每 2-3 轮做一次）。
+    ZOMBIE_PROBE_INTERVAL = 1.5
 
     def _reap_dead_tasks(self, snaps: list[dict]):
         """清理"僵尸任务"（v1.11.0）：线程已死但状态还停在下载中/等待中。
@@ -3627,6 +3717,12 @@ class Manager:
           2. `_run_thread` 存在且已 not alive()
           3. 连续 ZOMBIE_STRIKES 次巡检都如此
         """
+        # ★ v3.1.9：节流 —— 距上次巡检不足 ZOMBIE_PROBE_INTERVAL 就直接跳过，
+        #   避免每轮刷新都为每个任务抢一次线程状态锁（多任务时是主要卡顿源）。
+        _now = now()
+        if _now - getattr(self, "_zombie_probe_t", 0.0) < self.ZOMBIE_PROBE_INTERVAL:
+            return
+        self._zombie_probe_t = _now
         try:
             for i, s in enumerate(snaps):
                 tid = s.get("tid")
@@ -3751,6 +3847,12 @@ class Manager:
         for it in data:
             try:
                 if it.get("state") in (STATE_DONE, STATE_CANCELLED):
+                    continue
+                # ★ v3.1.9 防御：存档里若已有重复 tid（旧版写坏的 jobs.json），
+                #   这里必须跳过，否则每次重启都会把重复叠加一次（1→2→4…），
+                #   且重复的 order 会让 snapshots() 返回重复条目 → GUI 崩溃。
+                _tid = it.get("tid") or ""
+                if _tid and _tid in self.tasks:
                     continue
                 # ★ v3.1.8 严重缺陷修复：必须沿用存档里的 tid。
                 #   断点数据存放在 out_dir/.xzd/<tid>/（meta.json + bitmap.bin

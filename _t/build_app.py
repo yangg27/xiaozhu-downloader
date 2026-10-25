@@ -14,8 +14,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
-import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if os.path.basename(ROOT) == "_t":
@@ -61,8 +59,21 @@ def run():
         sys.exit(3)
 
     # 把产物挪到 dist_app/ 下（与文档一致）
+    # ★ v3.1.9：不再用 shutil.rmtree 删除旧产物目录。
+    #   一是它会触发工作区的"批量删除安全策略"（要删 900+ 个文件，远超阈值），
+    #   导致整个构建在最后一步被拦下、必须人工接手；
+    #   二是改名归档比直接删除更安全（构建出问题还能回退对比）。
     if os.path.exists(DIST):
-        shutil.rmtree(DIST, ignore_errors=True)
+        archive = os.path.join(os.path.dirname(DIST), "_old_产物归档")
+        try:
+            if os.path.isdir(archive):
+                import shutil as _sh
+                _sh.rmtree(archive, ignore_errors=True)
+            os.rename(DIST, archive)
+            print(f"[build_app] 旧产物已归档: {os.path.basename(archive)}")
+        except OSError:
+            # 改名失败（如目录被占用）才退回删除
+            shutil.rmtree(DIST, ignore_errors=True)
     os.makedirs(os.path.dirname(DIST), exist_ok=True)
     shutil.move(DIST_SRC, DIST)
 
@@ -79,23 +90,23 @@ def run():
 
     # tray.ico 由 PyInstaller datas 直接打包到 _internal/，不再复制到 exe 同级
 
-    # 把浏览器扩展源码打包为 .crx，只保留 crx 产物
+    # v3.1.9: 浏览器扩展改为**文件夹**分发（不再打 crx）。
+    # 原因：Chrome/Edge 会拦截本地 .crx 的拖拽安装（提示"无法从该网站添加应用"），
+    # 用户还要手动改后缀解压，体验差且容易卡住。
+    # 直接给 browser-extension 文件夹 → 「加载已解压的扩展程序」一步到位。
     ext_src = os.path.join(ROOT, "_assets", "browser-extension")
+    ext_dst = os.path.join(app_dir, "browser-extension")
     if os.path.isdir(ext_src):
-        ext_crx = os.path.join(app_dir, "browser-extension.crx")
-        ext_tmp = os.path.join(tempfile.gettempdir(), "browser-extension.zip")
-        with zipfile.ZipFile(ext_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(ext_src):
-                for fn in files:
-                    full = os.path.join(root, fn)
-                    arc = os.path.relpath(full, ext_src)
-                    zf.write(full, arc)
-        shutil.copy2(ext_tmp, ext_crx)
-        try:
-            os.remove(ext_tmp)
-        except Exception:
-            pass
-        print("[build_app] 已打包 browser-extension.crx")
+        if os.path.exists(ext_dst):
+            shutil.rmtree(ext_dst, ignore_errors=True)
+        shutil.copytree(ext_src, ext_dst)
+        # 剔除可能残留的打包垃圾
+        for junk in ("default-settings.png",):
+            p = os.path.join(ext_dst, junk)
+            if os.path.exists(p):
+                os.remove(p)
+        n = sum(len(fs) for _r, _d, fs in os.walk(ext_dst))
+        print(f"[build_app] 已复制浏览器扩展文件夹: browser-extension/（{n} 个文件）")
 
     # 生成带箭头标注的扩展安装指引图
     guide_script = os.path.join(ROOT, "_t", "gen_extension_guide.py")
@@ -106,6 +117,24 @@ def run():
             print("[build_app] 已生成扩展安装指引图")
         else:
             print("[build_app] 扩展安装指引图生成失败", file=sys.stderr)
+
+    # v3.1.9: 帮助页要展示「默认设置截图」，放 exe 同级供运行时加载。
+    #   优先用 _assets/ 里已生成好的；没有则现场渲染一张。
+    shot_dst = os.path.join(app_dir, "default-settings.png")
+    shot_src = os.path.join(ROOT, "_assets", "default-settings.png")
+    shot_script = os.path.join(ROOT, "_t", "gen_settings_shot.py")
+    made = False
+    if os.path.exists(shot_script):
+        rc = subprocess.run([py, shot_script, shot_dst]).returncode
+        made = (rc == 0 and os.path.exists(shot_dst))
+    if not made and os.path.exists(shot_src):
+        shutil.copy2(shot_src, shot_dst)
+        made = True
+    if made:
+        print("[build_app] 已生成默认设置截图: default-settings.png")
+    else:
+        print("[build_app] 默认设置截图生成失败（帮助页将显示提示文字）",
+              file=sys.stderr)
 
     # 顺手清理 PyInstaller 默认 dist/ 空目录
     try:

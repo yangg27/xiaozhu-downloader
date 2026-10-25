@@ -11,8 +11,10 @@
   · 用户要的是「双击安装 → 之后一直安静跑」，不是「每次启动等解压」。
 
 资源策略：
-  · browser-extension.crx / 使用说明.md / 浏览器扩展安装指引.png 由构建脚本**拷到 exe 同级**，
-    这样用户能直接看到扩展文件和说明图。
+  · 浏览器扩展以**文件夹** browser-extension/ 形式拷到 exe 同级（v3.1.9 起，
+    不再打 crx —— 浏览器会拦截本地 crx 安装，用户还得手动改后缀解压）。
+  · 使用说明.md / 浏览器扩展安装指引.png / default-settings.png 同样拷到 exe 同级，
+    这样用户能直接看到扩展文件、说明图和默认设置截图。
   · tray.ico 放在 _assets/ 下，由 PyInstaller datas 打包到 _internal/，
     安装目录根目录不再保留图标文件。
   · third_party/aria2/ 内置 aria2c.exe + N_m3u8DL-RE.exe（v2.6.0），

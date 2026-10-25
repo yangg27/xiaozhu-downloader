@@ -36,7 +36,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.1.8"
+VERSION = "3.1.9"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -702,7 +702,8 @@ def main():
                 "安装完成",
                 f"{APP_NAME} v{VERSION} 已安装到：\n{INSTALL_DIR}\n\n"
                 "· 软件已自动在后台启动，托盘区可找到图标\n"
-                "· 浏览器扩展：将 crx 改后缀为 zip 解压后加载\n"
+                "· 浏览器扩展：在扩展页选「加载已解压的扩展程序」，"
+                "指向安装目录下的 browser-extension 文件夹\n"
                 "· 任务记录和设置会自动保留",
                 [("查看帮助", "help"), ("开始使用", "done")]
             )

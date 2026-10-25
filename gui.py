@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v3.1.8
+小助下载器 · 图形界面  gui.py   v3.1.9
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -467,14 +467,17 @@ class NewDownloadDialog(Dialog):
 
 class SettingsDialog(Dialog):
     def __init__(self, master, mgr, app=None):
-        # v3.1.8: 窗口加宽加高，两列紧凑排布，尽量一屏放下全部设置
+        # v3.1.9: 布局重构 —— 长输入框独占整行并随窗口拉伸，
+        # 说明文字移到控件下方（不再挤占横向空间），右列勾选框不再被顶出可视区。
         try:
             _sh = master.winfo_screenheight()
+            _sw = master.winfo_screenwidth()
         except Exception:
-            _sh = 1080
-        # 内容实测约 620px，1080p 屏给足 760 以免出现滚动条
-        _h = max(560, min(760, _sh - 100))
-        super().__init__(master, "设置", 760, _h, resizable=True, scrollable=True)
+            _sh, _sw = 1080, 1920
+        # 两列布局内容实高约 700px；窗口宽 720 起（小屏自动收窄）
+        _w = max(660, min(760, _sw - 80))
+        _h = max(560, min(780, _sh - 90))
+        super().__init__(master, "设置", _w, _h, resizable=True, scrollable=True)
         self.mgr = mgr
         self.app = app
         self._entries: dict[str, tk.Entry] = {}
@@ -526,37 +529,37 @@ class SettingsDialog(Dialog):
                 if not (1 <= v <= 32):
                     raise ValueError
             except ValueError:
-                ok, msg = False, "默认线程数必须是 1-32 的整数"
+                ok, msg = False, "必须是 1-32 的整数"
         elif key == "row3":
             try:
                 v = int(txt)
                 if not (1 <= v <= 20):
                     raise ValueError
             except ValueError:
-                ok, msg = False, "同时下载任务数必须是 1-20 的整数"
+                ok, msg = False, "必须是 1-20 的整数"
         elif key == "row4":
             try:
                 v = int(txt)
                 if v < 0:
                     raise ValueError
             except ValueError:
-                ok, msg = False, "全局限速必须是大于等于 0 的整数（KB/s）"
+                ok, msg = False, "必须是大于等于 0 的整数"
         elif key == "row7":
             try:
                 v = int(txt)
                 if not (1024 <= v <= 65535):
                     raise ValueError
             except ValueError:
-                ok, msg = False, "本地接口端口必须是 1024-65535 的整数"
+                ok, msg = False, "必须是 1024-65535 的整数"
         elif key == "row5":
             if txt and not re.match(r"^(https?|socks5?)://", txt, re.I):
-                ok, msg = False, "代理格式形如 http://127.0.0.1:7890 或留空"
+                ok, msg = False, "形如 http://127.0.0.1:7890，或留空"
         elif key == "row6":
             if not txt:
                 ok, msg = False, "User-Agent 不能为空"
         elif key == "row14":
             if txt and not txt.lower().startswith(("http://", "https://")):
-                ok, msg = False, "Tracker 源必须是 http:// 或 https:// 链接"
+                ok, msg = False, "必须是 http:// 或 https:// 链接"
         color = ERR if not ok else BORDER
         e.config(highlightbackground=color)
         err.config(text=msg)
@@ -602,22 +605,39 @@ class SettingsDialog(Dialog):
         self.bind("<Control-Alt-p>", lambda e: self._save_screenshot())
         self.bind("<Control-Alt-P>", lambda e: self._save_screenshot())
 
-        f.columnconfigure(1, weight=1)
-        f.columnconfigure(3, weight=1)
+        # v3.1.9: 改为「标签-输入-说明」同行 7 列网格。
+        # 数值输入框很短（48-62px），说明文字放它右边完全不挤，
+        # 比"说明单独占一行"省下约 120px 高度，整页一屏放得下。
+        f.columnconfigure(0, weight=0)          # 左标签
+        f.columnconfigure(1, weight=0)          # 左输入
+        f.columnconfigure(2, weight=0)          # 左说明
+        f.columnconfigure(3, weight=1)          # 弹性间隔
+        f.columnconfigure(4, weight=0)          # 右标签
+        f.columnconfigure(5, weight=0)          # 右输入
+        f.columnconfigure(6, weight=0)          # 右说明
 
-        def lbl(r, c, t, bold=False):
+        def lbl(r, c, t, bold=False, span=1, pady=(0, 6)):
             tk.Label(f, text=t, bg=BG, fg=FG,
                      font=(FONT, 9, "bold" if bold else "normal")).grid(
-                row=r, column=c, sticky="w", pady=(0, 6))
+                row=r, column=c, columnspan=span, sticky="w", pady=pady)
 
-        def ent(var, r, c, w=10, name="", row_span=1):
-            """v3.1.8: 错误提示改为浮层叠加，不占布局高度。"""
+        def hint(r, c, t, span=1, pady=(0, 6)):
+            """说明文字（淡色小字）。"""
+            tk.Label(f, text=t, bg=BG, fg=FG_DIM, font=(FONT, 8)).grid(
+                row=r, column=c, columnspan=span, sticky="w", padx=(8, 0), pady=pady)
+
+        def ent(var, r, c, w=10, name="", row_span=1, span=1, wide=False):
+            """输入框。wide=True 时随列拉伸填满可用宽度。
+
+            v3.1.8: 错误提示改为浮层叠加，不占布局高度。
+            """
             fr = tk.Frame(f, bg=BG)
-            fr.grid(row=r, column=c, rowspan=row_span, sticky="w", pady=(2, 6))
+            fr.grid(row=r, column=c, columnspan=span, rowspan=row_span,
+                    sticky="we" if wide else "w", pady=(0, 6))
             e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
                          relief="solid", bd=1, highlightthickness=1,
                          highlightbackground=BORDER, highlightcolor=ACCENT)
-            e.pack(side="top", ipady=3)
+            e.pack(side="top", fill="x" if wide else "none", expand=bool(wide), ipady=3)
             err = tk.Label(fr, text="", bg="#fff5f5", fg=ERR, font=(FONT, 8),
                            anchor="w", padx=4)
             key = name or f"row{r}"
@@ -631,66 +651,66 @@ class SettingsDialog(Dialog):
         def cb(text, var, r, c, cs=1):
             b = tk.Checkbutton(f, text=text, variable=var, bg=BG, fg=FG, font=(FONT, 9),
                                activebackground=BG, selectcolor="#fff")
-            b.grid(row=r, column=c, columnspan=cs, sticky="w", pady=(0, 3))
+            b.grid(row=r, column=c, columnspan=cs, sticky="w", pady=(0, 4))
             return b
 
-        # 下载设置
+        # ---- 下载设置 ----
         tk.Label(f, text="下载设置", bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+            row=0, column=0, columnspan=7, sticky="w", pady=(0, 8))
 
-        lbl(1, 0, "默认保存目录")
+        # 默认保存目录：独占整行，输入框随窗口拉伸
+        lbl(1, 0, "默认保存目录", span=7)
         fr = tk.Frame(f, bg=BG)
-        fr.grid(row=1, column=1, columnspan=3, sticky="we", pady=(0, 6))
-        tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
-                 relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=3)
+        fr.grid(row=2, column=0, columnspan=7, sticky="we", pady=(0, 10))
+        e_dir = tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
+                         relief="solid", bd=1, highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=ACCENT)
+        e_dir.pack(side="left", fill="x", expand=True, ipady=3)
+        self._entries["row1"] = e_dir
+        self._errors["row1"] = tk.Label(fr, text="", bg="#fff5f5", fg=ERR,
+                                        font=(FONT, 8), anchor="w", padx=4)
         tk.Button(fr, text="浏览", command=lambda: self._pick(self.v_dir),
                   font=(FONT, 9), bg="#eef1f6", fg=FG, relief="flat", padx=10,
                   cursor="hand2").pack(side="left", padx=(6, 0))
 
-        lbl(2, 0, "默认线程数")
-        ent(self.v_conns, 2, 1, 6, name="row2")
-        tk.Label(f, text="每个任务连接数（1-32）", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
+        # 数值类：每行两个（标签 + 短输入 + 说明同行）
+        lbl(3, 0, "默认线程数")
+        ent(self.v_conns, 3, 1, 6, name="row2")
+        hint(3, 2, "每个任务连接数（1-32）")
+        lbl(3, 4, "同时下载任务数")
+        ent(self.v_par, 3, 5, 6, name="row3")
+        hint(3, 6, "超过此数后排队")
 
-        lbl(2, 4, "同时下载任务数")
-        ent(self.v_par, 2, 5, 6, name="row3")
-        tk.Label(f, text="超过后排队", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=2, column=6, sticky="w", padx=(8, 0), pady=(0, 6))
+        lbl(4, 0, "全局限速")
+        ent(self.v_limit, 4, 1, 8, name="row4")
+        hint(4, 2, "KB/s，0 表示不限速")
+        lbl(4, 4, "本地接口端口")
+        ent(self.v_port, 4, 5, 6, name="row7")
+        hint(4, 6, "扩展通信端口（1024-65535）")
 
-        lbl(3, 0, "全局限速")
-        ent(self.v_limit, 3, 1, 8, name="row4")
-        tk.Label(f, text="KB/s，0 表示不限速", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(0, 6))
+        # 长文本类：独占整行并拉伸
+        lbl(5, 0, "代理服务器", span=7)
+        ent(self.v_proxy, 6, 0, 40, name="row5", span=7, wide=True)
 
-        lbl(3, 4, "本地接口端口")
-        ent(self.v_port, 3, 5, 6, name="row7")
-        tk.Label(f, text="浏览器扩展通信端口", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=3, column=6, sticky="w", padx=(8, 0), pady=(0, 6))
+        lbl(7, 0, "User-Agent", span=7)
+        ent(self.v_ua, 8, 0, 40, name="row6", span=7, wide=True)
 
-        lbl(4, 0, "代理服务器")
-        ent(self.v_proxy, 4, 1, 28, name="row5")
-        tk.Label(f, text="形如 http://127.0.0.1:7890，留空为直连", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=4, column=2, columnspan=3, sticky="w",
-                                      padx=(8, 0), pady=(0, 6))
+        # 下载设置区的勾选框
+        self.cb_tmp = cb("任务完成后自动清理临时分片", self.v_tmp, 9, 0, cs=3)
+        self.cb_insecure = cb("忽略 HTTPS 证书错误（不推荐）", self.v_insecure, 9, 4, cs=3)
+        self.cb_clipboard = cb("剪贴板监听（复制链接自动弹新建下载）",
+                               self.v_clipboard, 10, 0, cs=7)
 
-        lbl(5, 0, "User-Agent")
-        ent(self.v_ua, 5, 1, 46, name="row6")
-
-        self.cb_tmp = cb("任务完成后自动清理临时分片", self.v_tmp, 6, 1, cs=2)
-        self.cb_insecure = cb("忽略 HTTPS 证书错误（不推荐）", self.v_insecure, 6, 3, cs=2)
-        self.cb_clipboard = cb("剪贴板监听（复制链接自动弹新建下载）", self.v_clipboard, 7, 1, cs=3)
-
-        # 引擎 / BT
-        tk.Frame(f, bg=BORDER, height=1).grid(row=8, column=0, columnspan=7,
-                                              sticky="we", pady=(10, 8))
+        # ---- 引擎 / BT ----
+        tk.Frame(f, bg=BORDER, height=1).grid(row=11, column=0, columnspan=7,
+                                              sticky="we", pady=(6, 8))
         tk.Label(f, text="下载引擎 / BT 磁力", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=9, column=0, columnspan=4,
+                 font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=7,
                                                sticky="w", pady=(0, 8))
 
-        lbl(10, 0, "默认下载引擎")
+        lbl(13, 0, "默认下载引擎")
         eng_frame = tk.Frame(f, bg=BG)
-        eng_frame.grid(row=10, column=1, columnspan=4, sticky="w", pady=(0, 6))
+        eng_frame.grid(row=13, column=1, columnspan=6, sticky="w", pady=(0, 8))
         tk.Radiobutton(eng_frame, text="内置多线程引擎（默认，最快）",
                        variable=self.v_engine, value="builtin",
                        bg=BG, fg=FG, font=(FONT, 9),
@@ -700,26 +720,27 @@ class SettingsDialog(Dialog):
                        bg=BG, fg=FG, font=(FONT, 9),
                        activebackground=BG, selectcolor="#fff").pack(side="left")
 
-        lbl(11, 0, "BT Trackers 源")
-        ent(self.v_bt_source, 11, 1, 46, name="row14")
-        tk.Label(f, text="启动时从此地址拉取 trackers", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=11, column=2, columnspan=3, sticky="w",
-                                      padx=(8, 0), pady=(0, 6))
+        lbl(14, 0, "BT Trackers 源", span=7)
+        ent(self.v_bt_source, 15, 0, 40, name="row14", span=7, wide=True)
 
-        self.cb_bt_autoupdate = cb("启动时自动更新 BT trackers（推荐）", self.v_bt_autoupdate, 12, 1, cs=3)
-        self.cb_bt_probe = cb("BT Tracker 测速过滤（只保留可达 tracker，推荐开启）", self.v_bt_probe_alive, 12, 4, cs=3)
+        self.cb_bt_autoupdate = cb("启动时自动更新 BT trackers（推荐）",
+                                   self.v_bt_autoupdate, 16, 0, cs=3)
+        self.cb_bt_probe = cb("BT Tracker 测速过滤（只保留可达 tracker）",
+                              self.v_bt_probe_alive, 16, 4, cs=3)
 
-        # 系统集成
-        tk.Frame(f, bg=BORDER, height=1).grid(row=13, column=0, columnspan=7,
-                                              sticky="we", pady=(10, 8))
+        # ---- 系统集成 ----
+        tk.Frame(f, bg=BORDER, height=1).grid(row=17, column=0, columnspan=7,
+                                              sticky="we", pady=(6, 8))
         tk.Label(f, text="系统集成", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=14, column=0, columnspan=4,
+                 font=(FONT, 10, "bold")).grid(row=18, column=0, columnspan=7,
                                                sticky="w", pady=(0, 8))
-        self.cb_autostart = cb("开机自启（后台静默运行，不弹窗）", self.v_autostart, 15, 1, cs=3)
-        self.cb_protocol = cb("注册 xzd:// 协议（浏览器点击下载自动唤起）", self.v_protocol, 15, 4, cs=3)
+        self.cb_autostart = cb("开机自启（后台静默运行，不弹窗）",
+                               self.v_autostart, 19, 0, cs=3)
+        self.cb_protocol = cb("注册 xzd:// 协议（浏览器点击自动唤起）",
+                              self.v_protocol, 19, 4, cs=3)
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
-                               justify="left", wraplength=560)
-        self.lbl_si.grid(row=16, column=1, columnspan=6, sticky="w", pady=(2, 4))
+                               justify="left", wraplength=660)
+        self.lbl_si.grid(row=20, column=0, columnspan=7, sticky="w", pady=(0, 4))
         if self.si is None:
             self.cb_autostart.config(state="disabled")
             self.cb_protocol.config(state="disabled")
@@ -728,8 +749,8 @@ class SettingsDialog(Dialog):
             self._refresh_si_label()
 
         tk.Label(f, text="全程离线：不检查更新、不联网校验、不上报任何数据",
-                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=17, column=0, columnspan=7,
-                                                      sticky="w", pady=(4, 8))
+                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=21, column=0, columnspan=7,
+                                                      sticky="w", pady=(0, 6))
 
         # 底部按钮栏（固定，不随内容滚动）
         btns = tk.Frame(outer, bg=BG)
@@ -989,10 +1010,10 @@ class HelpDialog(Dialog):
                  font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
         steps = [
             "打开 Chrome：chrome://extensions 或 Edge：edge://extensions",
-            "打开右上角「开发者模式」",
-            "把安装目录下的 browser-extension.crx 改后缀为 .zip，解压得到文件夹",
-            "点「加载已解压的扩展程序」，选择上一步解压出的文件夹",
-            "建议把扩展图标固定到工具栏",
+            "打开右上角「开发者模式」开关",
+            "点「加载已解压的扩展程序」",
+            "选择安装目录下的 browser-extension 文件夹（整个文件夹）",
+            "建议点扩展栏的拼图图标，把「小助下载器」固定到工具栏",
         ]
         for i, st in enumerate(steps, 1):
             tk.Label(f, text=f"{i}. {st}", bg=BG, fg=FG, font=(FONT, 9),
@@ -1037,11 +1058,13 @@ class HelpDialog(Dialog):
             tk.Label(f, text=f"· {name}：{desc}", bg=BG, fg=FG, font=(FONT, 9),
                      wraplength=520, justify="left").pack(anchor="w", pady=(2, 2))
 
-        # 默认设置截图占位
+        # 默认设置截图
         tk.Label(f, text="默认设置截图", bg=BG, fg=FG,
                  font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
-        tk.Label(f, text="在设置页面按 Ctrl+Alt+P 可保存当前截图到安装目录。",
-                 bg=BG, fg=FG_DIM, font=(FONT, 8)).pack(anchor="w", pady=(0, 6))
+        tk.Label(f, text="下图即「设置」页的默认状态。若界面有改动，"
+                         "可在设置页按 Ctrl+Alt+P 重新截图保存。",
+                 bg=BG, fg=FG_DIM, font=(FONT, 8), wraplength=520,
+                 justify="left").pack(anchor="w", pady=(0, 6))
         self._img_lbl = tk.Label(f, text="未找到默认设置截图", bg="#eef1f6", fg=FG_DIM,
                                  font=(FONT, 9), width=60, height=12, relief="flat")
         self._img_lbl.pack(anchor="w", pady=(0, 8))
@@ -1054,14 +1077,20 @@ class HelpDialog(Dialog):
                   fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left")
 
     def _load_default_settings_image(self):
-        """加载安装目录下的 default-settings.png，若不存在则显示提示。"""
-        candidates = [
-            os.path.join(dlcore.app_root(), "default-settings.png"),
-        ]
+        """加载安装目录下的 default-settings.png，若不存在则显示提示。
+
+        v3.1.9: 截图由构建脚本生成并放到 exe 同级；源码运行时读 _assets/。
+        """
+        candidates = []
         if dlcore.is_frozen():
-            candidates.insert(0, os.path.join(os.path.dirname(os.path.abspath(sys.executable)),
-                                              "default-settings.png"))
-        candidates.append(os.path.join(dlcore.app_root(), "browser-extension", "default-settings.png"))
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates.append(os.path.join(exe_dir, "default-settings.png"))
+            # one-dir 形态下资源也可能被 PyInstaller 放进 _internal/
+            candidates.append(os.path.join(exe_dir, "_internal", "default-settings.png"))
+        candidates.append(os.path.join(dlcore.app_root(), "default-settings.png"))
+        candidates.append(os.path.join(dlcore.app_root(), "_assets", "default-settings.png"))
+        candidates.append(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "_assets", "default-settings.png"))
         path = ""
         for c in candidates:
             if os.path.exists(c):
@@ -1671,7 +1700,20 @@ class App:
                     self.tree.item(s["tid"], values=vals, tags=tags)
                     prev[s["tid"]] = key
             else:
-                self.tree.insert("", "end", iid=s["tid"], values=vals, tags=tags)
+                # ★ v3.1.9 严重缺陷修复：insert 必须容错。
+                #   此前若 mgr.snapshots() 返回了重复 tid（order 里同一 tid
+                #   出现两次 —— 由 tid 生成碰撞 / 旧版写坏的 jobs.json 引起），
+                #   同一 iid 会 insert 两次，Tk 抛
+                #     TclError: Item xxx already exists
+                #   且该异常发生在主线程 → **整个进程当场退出**。
+                #   用户看到的现象是：下载一完成软件就没了，浏览器扩展点
+                #   「打开 / 目录」自然毫无反应（进程都不在了）。
+                #   现在把重复项就地更新，绝不因一行表格数据杀掉整个程序。
+                try:
+                    self.tree.insert("", "end", iid=s["tid"], values=vals, tags=tags)
+                except Exception:
+                    existing.add(s["tid"])
+                    self.tree.item(s["tid"], values=vals, tags=tags)
                 prev[s["tid"]] = key
         # 清掉已删除行的缓存，避免长跑时字典无限增长
         if len(prev) > len(wanted):

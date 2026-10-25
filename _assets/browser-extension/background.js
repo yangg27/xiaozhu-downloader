@@ -200,11 +200,37 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 // ------------------------- 与本地下载器通信 -------------------------
+/**
+ * ★ v3.1.9 修复：所有本地接口请求必须带超时。
+ *   此前用裸 fetch —— 下载器正在下载大量任务时，/status 偶发要
+ *   1.8~2 秒才应答（GIL 争抢）；若服务端卡住，fetch 会**永远挂起**，
+ *   用户点「打开 / 目录」后按钮一直没反应，也看不到任何错误提示。
+ *   这里统一加 AbortController 超时，超时即抛错 → 上层能给出明确提示。
+ */
+const API_TIMEOUT_MS = 6000;
+
+async function xzdFetch(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => {
+    try { ctl.abort(); } catch (e) { /* ignore */ }
+  }, timeoutMs);
+  try {
+    return await fetch(url, Object.assign({}, options, { signal: ctl.signal }));
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) {
+      throw new Error(`请求超时（超过 ${Math.round(timeoutMs / 1000)} 秒无响应）`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function probePort() {
   // 依次探测端口，找到正在运行的下载器
   for (let p = DEFAULT_PORT; p < DEFAULT_PORT + PORT_RANGE; p++) {
     try {
-      const r = await fetch(`http://127.0.0.1:${p}/ping`, { method: 'GET' });
+      const r = await xzdFetch(`http://127.0.0.1:${p}/ping`, { method: 'GET' }, 1200);
       if (!r.ok) continue;
       const j = await r.json();
       if (j && j.ok && j.app) {
@@ -224,7 +250,7 @@ async function ensureToken() {
   if (state.token) {
     // 校验令牌是否仍有效，同时刷新活动任务列表
     try {
-      const r = await fetch(`http://127.0.0.1:${state.port}/status`, {
+      const r = await xzdFetch(`http://127.0.0.1:${state.port}/status`, {
         headers: { 'X-XZD-Token': state.token }
       });
       if (r.ok) {
@@ -243,7 +269,7 @@ async function fetchHistory(limit = 100) {
   const ok = await ensureToken();
   if (!ok) { state.history = []; return; }
   try {
-    const r = await fetch(`http://127.0.0.1:${state.port}/history?limit=${limit}&token=${state.token}`);
+    const r = await xzdFetch(`http://127.0.0.1:${state.port}/history?limit=${limit}&token=${state.token}`);
     const j = await r.json().catch(() => ({}));
     state.history = j.items || [];
   } catch (e) { state.history = []; }
@@ -253,7 +279,7 @@ async function sendToDownloader(payload) {
   const ok = await ensureToken();
   if (!ok) return { ok: false, error: '未检测到小助下载器，请先启动它' };
   try {
-    const r = await fetch(`http://127.0.0.1:${state.port}${payload.path}`, {
+    const r = await xzdFetch(`http://127.0.0.1:${state.port}${payload.path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -302,7 +328,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const ok = await ensureToken();
         if (!ok) { reply({ ok: false, error: '未连接下载器' }); break; }
         try {
-          const r = await fetch(`http://127.0.0.1:${state.port}/open`, {
+          const r = await xzdFetch(`http://127.0.0.1:${state.port}/open`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
             body: JSON.stringify({ tid, mode })
@@ -641,7 +667,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const r = await ensureToken();
     if (!r) { notifyUser('未连接', '请启动小助下载器'); return; }
     try {
-      const resp = await fetch(`http://127.0.0.1:${state.port}/open`, {
+      const resp = await xzdFetch(`http://127.0.0.1:${state.port}/open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
         body: JSON.stringify({ tid: it.tid, mode })

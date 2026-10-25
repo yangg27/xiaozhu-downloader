@@ -44,6 +44,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import dlcore  # noqa: E402
+import localserver  # noqa: E402
 from tests.range_server import RangeServer  # noqa: E402
 
 RESULTS: list[dict] = []
@@ -1353,6 +1354,285 @@ def k4(ctx):
         return "恶意 Origin 403；chrome-extension 放行并可获取 token"
     finally:
         lapi.stop()
+
+
+@case("K localserver", "K5_status只返回活动任务_已完成不残留")
+def k5(ctx):
+    """v3.1.9 缺陷回归：/status 曾把已完成任务也算进活动列表，
+    扩展「下载中」页签里下完的任务一直留着，用户以为还在下载。"""
+    tmp = tempfile.mkdtemp(prefix="xzd_K5_")
+    port = 18804
+    payload = RangeServer.make_payload(256 * 1024, seed=131)
+    srv = RangeServer({"/a.bin": payload, "/b.bin": payload}).start()
+    mgr, lapi, holder = _start_api(tmp, port)
+    base = "http://127.0.0.1:%d" % lapi.actual_port
+    slow_srv = None
+    try:
+        st, body = _http("GET", base + "/ping")
+        token = json.loads(body).get("token", "")
+
+        # 先加一个"长跑"任务占住活动列表（服务器全局限速，测期内不会结束）
+        slow_srv = RangeServer({"/slow.bin": RangeServer.make_payload(
+            4 * 1024 * 1024, seed=132)}, global_rate_bps=256 * 1024).start()
+        st, body = _http("POST", base + "/add",
+                         {"url": slow_srv.url("/slow.bin"),
+                          "out_dir": os.path.join(tmp, "dl")}, token=token)
+        assert st == 200, "/add(slow) 失败: %s %s" % (st, body)
+        tid_slow = json.loads(body)["tid"]
+
+        # 再放一个立即完成的任务
+        st, body = _http("POST", base + "/add",
+                         {"url": srv.url("/b.bin"), "out_dir": os.path.join(tmp, "dl"),
+                          "filename": "b.bin"},
+                         token=token)
+        tid_fast = json.loads(body)["tid"]
+        t_fast = mgr.get(tid_fast)
+        _wait_done(t_fast, timeout=90)
+        assert t_fast.state == dlcore.STATE_DONE, "任务未完成: %s" % t_fast.err
+
+        st, body = _http("GET", base + "/status", token=token)
+        assert st == 200, "/status 失败: %s" % st
+        j = json.loads(body)
+        states = {x["tid"]: x["state"] for x in j["tasks"]}
+        assert tid_fast not in states, \
+            "已完成任务仍在活动列表: %s（问题5a 回归）" % j["tasks"]
+        assert tid_slow in states, "进行中的任务不应被过滤掉"
+        assert j.get("total_count", 0) >= 1, "total_count 未提供"
+
+        # 已完成任务必须能在 /history 里找到，且带 final 路径与 exists 标记
+        st, body = _http("GET", base + "/history?limit=10", token=token)
+        assert st == 200, "/history 失败: %s" % st
+        hist = json.loads(body)["items"]
+        hit = [h for h in hist if h.get("tid") == tid_fast]
+        assert hit, "已完成任务不在 /history 里"
+        assert hit[-1].get("final"), "/history 缺 final 路径"
+        assert hit[-1].get("exists") is True, "/history 的 exists 标记错误"
+        return ("活动列表 %d 个（已完成已剔除、进行中保留）；"
+                "/history 有该任务且 final/exists 正确" % len(j["tasks"]))
+    finally:
+        try:
+            if slow_srv:
+                slow_srv.stop()
+        except Exception:
+            pass
+        for t in list(mgr.tasks.values()):
+            try:
+                t.cancel(delete_files=True)
+            except Exception:
+                pass
+        lapi.stop()
+        srv.stop()
+
+
+@case("K localserver", "K6_open支持历史任务与文件失效兜底")
+def k6(ctx):
+    """v3.1.9 缺陷回归：扩展点「打开/目录」曾必然失败——
+    ① 重启后任务不在活动列表 → /open 直接 404「任务不存在」；
+    ② 文件已被移动/删除时错误信息不明。"""
+    tmp = tempfile.mkdtemp(prefix="xzd_K6_")
+    port = 18805
+    payload = RangeServer.make_payload(128 * 1024, seed=141)
+    srv = RangeServer({"/h.bin": payload}).start()
+    mgr, lapi, holder = _start_api(tmp, port)
+    base = "http://127.0.0.1:%d" % lapi.actual_port
+    try:
+        st, body = _http("GET", base + "/ping")
+        token = json.loads(body).get("token", "")
+        st, body = _http("POST", base + "/add",
+                         {"url": srv.url("/h.bin"), "out_dir": os.path.join(tmp, "dl"),
+                          "filename": "h.bin"}, token=token)
+        tid = json.loads(body)["tid"]
+        t = mgr.get(tid)
+        _wait_done(t, timeout=90)
+        final = t.created_final
+        assert os.path.exists(final), "文件未落盘: %s" % final
+
+        # ① 活动任务里能打开（不真的弹窗口，只校验返回结构）
+        st, body = _http("POST", base + "/open", {"tid": tid, "mode": "file"}, token=token)
+        assert st == 200, "/open(file) 应 200，实际 %s %s" % (st, body)
+
+        # ② 模拟「重启后」：新 Manager 从同一 data_dir 加载，
+        #    活动列表为空，任务只剩在 history 里
+        #    （_new_mgr 把 data_dir 设为 tmp/data，必须保持一致）
+        mgr2 = dlcore.Manager(data_dir=mgr.data_dir)
+        assert len(mgr2.snapshots()) == 0, "新 Manager 不应有活动任务"
+        assert any(h.get("tid") == tid for h in mgr2.history()), \
+            "任务未进入 history，测试前提不成立"
+
+        api2 = localserver.LocalAPI(mgr2, port=port + 1)
+        api2.start()
+        base2 = "http://127.0.0.1:%d" % api2.actual_port
+        try:
+            st, body = _http("GET", base2 + "/ping")
+            tk2 = json.loads(body).get("token", "")
+            st, body = _http("POST", base2 + "/open",
+                             {"tid": tid, "mode": "folder"}, token=tk2)
+            assert st == 200, \
+                "重启后 /open(folder) 应能从 history 打开，实际 %s %s（问题5b 回归）" % (st, body)
+
+            # ③ 文件被删除后：folder 仍打开目录并带 note；file 明确报错
+            os.remove(final)
+            st, body = _http("POST", base2 + "/open",
+                             {"tid": tid, "mode": "folder"}, token=tk2)
+            j = json.loads(body)
+            assert st == 200 and j.get("ok"), "文件删除后 folder 应仍能打开目录: %s" % body
+            assert j.get("note"), "文件已失效时应给出 note 提示: %s" % body
+            st, body = _http("POST", base2 + "/open",
+                             {"tid": tid, "mode": "file"}, token=tk2)
+            assert st == 404, "文件删除后 file 应 404，实际 %s" % st
+            assert "不存在" in body, "错误信息应说明文件不存在: %s" % body
+
+            # ④ 完全不存在的 tid
+            st, body = _http("POST", base2 + "/open",
+                             {"tid": "ffffffffffff", "mode": "folder"}, token=tk2)
+            assert st == 404, "未知 tid 应 404，实际 %s" % st
+        finally:
+            api2.stop()
+        return "活动可开；重启后凭 history 可开；文件失效时 folder 兜底+file 明确报错；未知 tid 404"
+    finally:
+        lapi.stop()
+        srv.stop()
+
+
+@case("K localserver", "K7_重复tid防护_不崩不脏不叠加")
+def k7(ctx):
+    """v3.1.9 严重缺陷回归：重复 tid 曾导致主程序当场崩溃。
+
+    实测（打包 exe 压力测试）：
+      同一 URL 并发 add（本地环回下载极快，多次 add 落在同一微秒）
+      → tid = md5(url|now()) 完全相同 → order 里插入两条同一 tid
+      → snapshots() 返回重复条目
+      → GUI tree.insert(iid=tid) 抛 TclError: Item xxx already exists
+      → **主线程未捕获异常，进程直接退出**
+      → 用户视角：下载一完成软件就消失，浏览器扩展点「打开/目录」毫无反应
+      且 save_jobs() 把重复写进 jobs.json，重启 load_jobs 再叠加（1→2→4…）。
+
+    本用例覆盖三层防护：
+      ① add_task 同一 tid 不重复入 order
+      ② snapshots() 永不返回重复 tid（GUI 侧 insert 不再抛异常）
+      ③ 旧版写坏的 jobs.json 能被 load_jobs 自愈（不叠加）
+    """
+    tmp = tempfile.mkdtemp(prefix="xzd_K7_")
+    data = os.path.join(tmp, "data")
+    os.makedirs(data, exist_ok=True)
+    mgr = dlcore.Manager(data_dir=data)
+    mgr.cfg["download_dir"] = os.path.join(tmp, "dl")
+    os.makedirs(mgr.cfg["download_dir"], exist_ok=True)
+
+    # ---- ① add_task 同 tid 两次 ----
+    mgr.add_task("http://127.0.0.1:9/dup.bin", tid="dup000000001",
+                 start=False, dedupe=False)
+    mgr.add_task("http://127.0.0.1:9/dup.bin", tid="dup000000001",
+                 start=False, dedupe=False)
+    assert mgr.order.count("dup000000001") == 1, \
+        "同一 tid 在 order 里应只出现一次，实际 %r" % mgr.order
+
+    # ---- ② snapshots 不重复（GUI insert 的 iid 唯一性前提）----
+    snaps = mgr.snapshots()
+    tids = [s["tid"] for s in snaps]
+    assert len(tids) == len(set(tids)), \
+        "snapshots() 返回了重复 tid，GUI tree.insert 会抛 TclError：%r" % tids
+
+    # ---- ③ 旧版写坏的 jobs.json 自愈 ----
+    bad = [{"tid": "bad000000001", "url": "http://127.0.0.1:9/bad.bin",
+            "out_dir": mgr.cfg["download_dir"], "filename": "bad.bin",
+            "kind": "file", "conns": 8, "state": "paused", "referer": "",
+            "group": "", "added_at": 1.0, "speed_limit": 0, "size": None,
+            "err": "", "phase": "暂停"}] * 4
+    with open(mgr.jobs_path(), "w", encoding="utf-8") as f:
+        json.dump(bad, f, ensure_ascii=False)
+    mgr2 = dlcore.Manager(data_dir=data)
+    mgr2.cfg["download_dir"] = mgr.cfg["download_dir"]
+    n = mgr2.load_jobs()
+    assert n == 1, "4 条重复应自愈为 1 条，实际恢复 %d 条" % n
+    assert mgr2.order.count("bad000000001") == 1, \
+        "自愈后 order 仍有重复：%r" % mgr2.order
+    tids2 = [s["tid"] for s in mgr2.snapshots()]
+    assert len(tids2) == len(set(tids2)), "自愈后 snapshots 仍有重复：%r" % tids2
+    mgr2.save_jobs()
+    with open(mgr2.jobs_path(), encoding="utf-8") as f:
+        after = json.load(f)
+    assert len(after) == 1, "重新保存后 jobs.json 应只剩 1 条，实际 %d" % len(after)
+
+    return ("同 tid 只入队 1 次；snapshots 无重复；4 条坏的 jobs.json 自愈为 1 条"
+            "且重存不复发")
+
+
+@case("K localserver", "K8_多任务下载不死锁_接口全程可用")
+def k8(ctx):
+    """v3.1.9 严重缺陷回归：自锁导致 Manager._lock 永不释放 → 全站卡死。
+
+    实测抓到线程堆栈（faulthandler dump）：
+      set_target_conns 持 _target_lock 调 _spawn_workers
+      → _spawn_workers 再次 `with self._target_lock` → **同线程自锁**
+      （_target_lock 是 threading.Lock，非可重入）
+    该线程原本还持有 Manager._lock（_rebalance_targets 拿的），自锁后永不释放：
+      · 所有 snapshots() 挂起 → /status 100% 超时、GUI 刷新卡死
+      · release_slot() 等 _cv 也被拖死 → 下载停摆
+      · /ping 不碰这些锁 → 正常（正是实测看到的特征：ping 16ms、status 超时）
+
+    触发条件：并发下载 ≥2 个任务（速度均衡会调线程数）时必现。
+
+    本用例：并发起多个任务（各申请 24 线程），在下载过程中反复调
+    snapshots()，断言全部及时返回（不挂起）。
+    """
+    tmp = tempfile.mkdtemp(prefix="xzd_K8_")
+    payload = RangeServer.make_payload(2 * 1024 * 1024, seed=155)
+    paths = {"/d%d.bin" % i: payload for i in range(6)}
+    srv = RangeServer(paths).start()
+    mgr = _new_mgr(tmp, max_parallel_tasks=3)
+    dl = os.path.join(tmp, "dl")
+    os.makedirs(dl, exist_ok=True)
+    try:
+        tasks = []
+        for i in range(6):
+            tasks.append(mgr.add_task(srv.url("/d%d.bin" % i), out_dir=dl,
+                                      filename="d%d.bin" % i, conns=24))
+        # 立刻开始高频调 snapshots()：修复前这里会永久挂起
+        deadlines = []
+        # 诊断用：挂起时把全部线程堆栈 dump 出来（只在失败路径产出）
+        import faulthandler
+        for round_i in range(20):
+            t0 = time.time()
+            res = {}
+
+            def call():
+                try:
+                    res["v"] = mgr.snapshots()
+                except Exception as e:
+                    res["e"] = repr(e)
+
+            th = threading.Thread(target=call, daemon=True)
+            th.start()
+            th.join(6.0)                    # 6 秒没返回 = 判定挂起
+            if th.is_alive():
+                faulthandler.dump_traceback()
+                raise AssertionError(
+                    "第 %d 轮 snapshots() 挂起超过 6 秒（死锁回归！）"
+                    "（堆栈已 dump 到 stderr）" % round_i)
+            if "e" in res:
+                raise AssertionError("snapshots() 抛异常: %s" % res["e"])
+            deadlines.append((time.time() - t0) * 1000)
+            time.sleep(0.25)
+
+        worst = max(deadlines)
+        assert worst < 3000, \
+            "snapshots() 最慢耗时 %.0fms，超过 3 秒（疑似锁竞争恶化）" % worst
+
+        # 全部任务最终应完成
+        for t in tasks:
+            _wait_done(t, timeout=120)
+        done = [t for t in tasks if t.state == dlcore.STATE_DONE]
+        assert len(done) == 6, "应有 6 个任务完成，实际 %d" % len(done)
+        # 快照仍应可用且不重复
+        snaps = mgr.snapshots()
+        tids = [s["tid"] for s in snaps]
+        assert len(tids) == len(set(tids)), "快照出现重复 tid: %r" % tids
+
+        return ("并发 6 任务（各 24 线程）下载中，snapshots() 20 轮全部及时返回"
+                "（最慢 %.0fms）；6/6 任务完成" % worst)
+    finally:
+        srv.stop()
 
 
 # =====================================================================

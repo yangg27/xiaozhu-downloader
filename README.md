@@ -97,8 +97,8 @@
 ### 浏览器扩展安装（Chrome / Edge）
 1. 地址栏输入 `chrome://extensions` 或 `edge://extensions`
 2. 打开右上角 **「开发者模式」**
-3. 把 `browser-extension.crx` 改后缀为 `.zip` 并解压
-4. 点 **「加载已解压的扩展程序」**，选择解压后的 `browser-extension` 文件夹
+3. 点 **「加载已解压的扩展程序」**
+4. 选择安装目录下的 **`browser-extension` 文件夹**（整个文件夹，无需解压）
 
 ---
 
@@ -110,7 +110,7 @@
 
 ![打开扩展管理页](docs/screenshots/ext-1-open.png)
 
-**第 2 步**：先把安装目录下的 `browser-extension.crx` 改后缀为 `.zip` 并解压；然后在弹出的窗口中选中解压后的 **`browser-extension`** 文件夹，点 **「选择文件夹」**。
+**第 2 步**：在弹出的窗口中选中安装目录下的 **`browser-extension`** 文件夹（整个文件夹，无需解压），点 **「选择文件夹」**。
 
 ![选择扩展目录](docs/screenshots/ext-2-select.png)
 
@@ -118,7 +118,7 @@
 
 ![安装成功](docs/screenshots/ext-3-done.png)
 
-> 💡 找不到扩展文件？安装目录下有一个 `browser-extension.crx`，改后缀为 `.zip` 解压后就会得到 `browser-extension` 文件夹。
+> 💡 找不到扩展文件夹？它就在安装目录下，名字是 `browser-extension`，点进去能看到 `manifest.json` 即为正确位置。
 
 ### 教程二：如何嗅探并下载网页资源
 

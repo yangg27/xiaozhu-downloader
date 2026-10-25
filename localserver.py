@@ -17,7 +17,9 @@
   POST /batch   {items:[{url,referer,...}], page}
   GET  /scan?url=...                分析网页媒体（由下载器代为请求）
   GET  /sniff?page=...              取最新嗅探结果（扩展轮询）
-  GET  /status                      活动任务概览
+  GET  /status                      活动任务概览（**不含已完成/已取消**）
+  GET  /history?limit=N             已完成下载记录（含文件真实路径与是否还在）
+  POST /open    {tid, mode}         打开已完成文件（file）或其所在目录（folder）
 """
 
 from __future__ import annotations
@@ -153,6 +155,12 @@ class LocalAPI:
                     if not self._token_ok():
                         return self._json({"ok": False, "error": "令牌无效"}, 401)
                     snap = api.mgr.snapshots()
+                    # ★ v3.1.9 缺陷修复：只返回**活动任务**。
+                    #   旧版把已完成的也一并返回，扩展「下载中」列表里
+                    #   会一直留着下完的任务，用户以为还在下载。
+                    #   （GUI 侧仍展示全部，这里只影响扩展视图。）
+                    active = [s for s in snap
+                              if s["state"] not in ("done", "cancelled")]
                     return self._json({
                         "ok": True,
                         "tasks": [{"tid": s["tid"], "filename": s["filename"],
@@ -160,15 +168,31 @@ class LocalAPI:
                                    "progress": s["progress"], "speed": s["speed"],
                                    "size": s["size"], "done_bytes": s["done_bytes"],
                                    "eta": s["eta"], "phase": s["phase"], "err": s["err"]}
-                                  for s in snap],
+                                  for s in active],
                         "total_speed": api.mgr.total_speed(),
+                        "active_count": len(active),
+                        "total_count": len(snap),
                     })
                 if path == "/history":
                     if not self._token_ok():
                         return self._json({"ok": False, "error": "令牌无效"}, 401)
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     limit = int((q.get("limit") or ["100"])[0])
-                    return self._json({"ok": True, "items": api.mgr.history(limit=limit)})
+                    items = api.mgr.history(limit=limit)
+                    # 补上 out_dir / exists，扩展点「打开/目录」需要且能提前提示失效
+                    out = []
+                    for h in items:
+                        it = dict(h)
+                        fin = it.get("final") or ""
+                        if not fin:
+                            od = it.get("out_dir") or ""
+                            fn = it.get("filename") or ""
+                            if od and fn:
+                                fin = os.path.join(od, fn)
+                                it["final"] = fin
+                        it["exists"] = bool(fin) and os.path.exists(fin)
+                        out.append(it)
+                    return self._json({"ok": True, "items": out})
                 if path == "/sniff":
                     if not self._token_ok():
                         return self._json({"ok": False, "error": "令牌无效"}, 401)
@@ -278,23 +302,56 @@ class LocalAPI:
                     # 扩展请求：打开已完成任务的文件或所在目录
                     tid = body.get("tid") or ""
                     mode = body.get("mode") or "file"   # file | folder
+                    target = ""
                     task = api.mgr.get(tid)
-                    if not task:
-                        return self._json({"ok": False, "error": "任务不存在"}, 404)
-                    target = task.created_final or task.final_path()
-                    if not target or not os.path.exists(target):
-                        return self._json({"ok": False, "error": "文件不存在"}, 404)
+                    if task:
+                        target = task.created_final or task.final_path()
+                    else:
+                        # ★ v3.1.9 缺陷修复：任务可能已不在活动列表里
+                        #   （软件重启后活动列表清空、或用户清理过任务），
+                        #   此时必须回历史记录里找，否则扩展「已完成」列表
+                        #   点「打开 / 目录」必然 404「任务不存在」——
+                        #   用户看到的就是"点了没反应"。
+                        for h in reversed(api.mgr.history(limit=500)):
+                            if h.get("tid") == tid:
+                                target = h.get("final") or ""
+                                if not target:
+                                    od = h.get("out_dir") or ""
+                                    fn = h.get("filename") or ""
+                                    if od and fn:
+                                        target = os.path.join(od, fn)
+                                break
+                    if not target:
+                        return self._json({"ok": False,
+                                           "error": "找不到该任务的下载文件记录"}, 404)
+                    exists = os.path.exists(target)
+                    folder = os.path.dirname(target)
                     try:
                         if mode == "folder":
-                            d = os.path.dirname(target)
-                            subprocess.Popen(["explorer", "/select,", os.path.normpath(target)],
-                                             creationflags=subprocess.CREATE_NO_WINDOW)
-                            return self._json({"ok": True, "opened": d})
+                            # 文件已不在但目录还在 → 仍然打开目录（比报错有用）
+                            if exists:
+                                subprocess.Popen(
+                                    ["explorer", "/select,", os.path.normpath(target)],
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                                return self._json({"ok": True, "opened": folder})
+                            if os.path.isdir(folder):
+                                subprocess.Popen(
+                                    ["explorer", os.path.normpath(folder)],
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                                return self._json({"ok": True, "opened": folder,
+                                                   "note": "文件已不在，已打开所在目录"})
+                            return self._json({"ok": False,
+                                               "error": "文件与所在目录都不存在"}, 404)
                         else:
+                            if not exists:
+                                return self._json(
+                                    {"ok": False,
+                                     "error": "文件不存在（可能已被移动或删除）"}, 404)
                             os.startfile(target)  # noqa
                             return self._json({"ok": True, "opened": target})
                     except Exception as e:
-                        return self._json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+                        return self._json({"ok": False,
+                                           "error": f"{type(e).__name__}: {e}"}, 500)
                 return self._json({"ok": False, "error": "未知接口"}, 404)
 
         # 只绑定 127.0.0.1

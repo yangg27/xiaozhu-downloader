@@ -145,7 +145,7 @@ function renderTasks(list) {
   const tasks = currentTasks || [];
   $('count').textContent = tasks.length ? `（${tasks.length}）` : '';
   if (!tasks.length) {
-    list.innerHTML = '<div class="empty">暂无活动下载任务<br><span>在网页中点击下载或复制链接即可开始</span></div>';
+    list.innerHTML = '<div class="empty">暂无进行中的下载<br><span>下完的任务会自动移到「已完成」</span></div>';
     return;
   }
   tasks.forEach((t) => {
@@ -196,28 +196,66 @@ function renderHistory(list) {
     const name = document.createElement('span');
     name.className = 'name';
     name.textContent = it.filename || it.url;
-    name.title = it.url;
+    name.title = it.final || it.url;
     const size = document.createElement('span');
     size.className = 'size';
     size.textContent = fmtSize(it.size);
     const acts = document.createElement('div');
     acts.className = 'acts-hist';
+
+    // 文件已被移动/删除时给出视觉提示，不让用户点了才发现
+    const gone = (it.exists === false);
     const btnOpen = document.createElement('button');
     btnOpen.textContent = '打开';
-    btnOpen.addEventListener('click', async () => {
+    if (gone) {
+      btnOpen.disabled = true;
+      btnOpen.title = '文件已不在原位置';
+      btnOpen.style.opacity = '0.45';
+      btnOpen.style.cursor = 'not-allowed';
+    }
+    btnOpen.addEventListener('click', async (ev) => {
+      if (gone) { showHint('文件已不在原位置，可点「目录」查看', true); return; }
+      const btn = ev.currentTarget;
+      btn.textContent = '…';
       const r = await send({ cmd: 'openFile', tid: it.tid, mode: 'file' });
-      $('hint').textContent = r && r.ok ? '已打开文件' : ('打开失败：' + ((r && r.error) || '未知'));
+      btn.textContent = '打开';
+      showHint(r && r.ok ? '已打开文件' : ('打开失败：' + ((r && r.error) || '未知')), !(r && r.ok));
     });
+
     const btnDir = document.createElement('button');
     btnDir.textContent = '目录';
-    btnDir.addEventListener('click', async () => {
+    btnDir.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.textContent = '…';
       const r = await send({ cmd: 'openFile', tid: it.tid, mode: 'folder' });
-      $('hint').textContent = r && r.ok ? '已打开目录' : ('打开失败：' + ((r && r.error) || '未知'));
+      btn.textContent = '目录';
+      if (r && r.ok) {
+        showHint(r.note || '已打开目录', false);
+      } else {
+        showHint('打开失败：' + ((r && r.error) || '未知'), true);
+      }
     });
+
     acts.append(btnOpen, btnDir);
     row.append(tag, name, size, acts);
+    if (gone) row.title = '文件已不在原位置（仍可打开所在目录）';
     list.appendChild(row);
   });
+}
+
+/** 底部提示：err=true 时用醒目样式，避免"点了没反应"的错觉 */
+function showHint(text, err) {
+  const h = $('hint');
+  if (!h) return;
+  h.textContent = text;
+  h.className = err ? 'hint err' : 'hint';
+  h.style.color = err ? '#d93025' : '';
+  clearTimeout(showHint._t);
+  showHint._t = setTimeout(() => {
+    h.textContent = activeTab === 'media' ? '嗅探到的媒体均可直接下载' : '点击任务可查看详情';
+    h.className = 'hint';
+    h.style.color = '';
+  }, 6000);
 }
 
 async function refreshMedia() {
@@ -245,9 +283,14 @@ async function refreshHistory() {
 }
 
 async function refresh() {
-  if (activeTab === 'media') await refreshMedia();
-  else if (activeTab === 'tasks') await refreshTasks();
-  else await refreshHistory();
+  if (activeTab === 'media') {
+    await refreshMedia();
+    // 媒体页也顺带取一次活动任务，便于底部状态一致
+  } else if (activeTab === 'tasks') {
+    await refreshTasks();
+  } else {
+    await refreshHistory();
+  }
   render();
 }
 
@@ -331,7 +374,7 @@ async function boot() {
     if (sel) sel.value = st.takeover || 'all';
   }
   await refresh();
-  // 自动轮询，让下载进度实时更新
+  // 自动轮询：让下载进度/完成记录实时更新（媒体页除外，避免打断浏览）
   setInterval(() => { if (activeTab !== 'media') refresh(); }, 1200);
 }
 

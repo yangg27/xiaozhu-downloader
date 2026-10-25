@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小助下载器 · 媒体嗅探",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "嗅探网页音视频并接管浏览器下载，自动转交本机小助下载器满速下载。支持 Chrome / Edge，完全本地不上报。",
   "minimum_chrome_version": "102",
   "permissions": [
