@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.6.0
+小助下载器 · 图形界面  gui.py   v2.6.1
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -169,13 +169,17 @@ def open_file(path: str):
 # ------------------------------ 通用对话框基类 ------------------------------
 
 class Dialog(tk.Toplevel):
-    def __init__(self, master, title: str, w: int, h: int):
+    def __init__(self, master, title: str, w: int, h: int, *,
+                 resizable: bool = False, scrollable: bool = False):
         super().__init__(master)
         self.title(title)
         self.configure(bg=BG)
-        self.resizable(False, False)
+        self.resizable(resizable, resizable)
         self.transient(master)
         self.result = None
+        self._dlg_w = w
+        self._dlg_h = h
+        self._scrollable = scrollable
         self.geometry(f"{w}x{h}")
         self._center(w, h)
         self.bind("<Escape>", lambda e: self.destroy())
@@ -185,6 +189,19 @@ class Dialog(tk.Toplevel):
         self.focus_force()
         self.attributes("-topmost", True)
         self.after(100, lambda: self.attributes("-topmost", False))
+        if scrollable:
+            self.bind("<Configure>", self._on_dlg_configure)
+
+    def _on_dlg_configure(self, event=None):
+        """可滚动对话框在尺寸变化时同步 canvas 可视区域。"""
+        if not self._scrollable or not hasattr(self, "_canvas"):
+            return
+        try:
+            self._canvas.configure(width=max(320, self.winfo_width() - 24))
+            self._canvas.itemconfig(self._canvas_window,
+                                    width=max(300, self.winfo_width() - 48))
+        except Exception:
+            pass
 
     def _center(self, w, h):
         self.update_idletasks()
@@ -446,7 +463,7 @@ class NewDownloadDialog(Dialog):
 
 class SettingsDialog(Dialog):
     def __init__(self, master, mgr, app=None):
-        super().__init__(master, "设置", 580, 700)
+        super().__init__(master, "设置", 560, 540, resizable=True, scrollable=True)
         self.mgr = mgr
         self.app = app
         c = mgr.cfg
@@ -483,26 +500,51 @@ class SettingsDialog(Dialog):
 
     def _lbl(self, p, t, r):
         tk.Label(p, text=t, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
-            row=r, column=0, sticky="w", pady=(0, 9))
+            row=r, column=0, sticky="w", pady=(0, 7))
 
     def _ent(self, p, var, r, w=30):
         e = tk.Entry(p, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
                      relief="solid", bd=1, highlightthickness=1,
                      highlightbackground=BORDER, highlightcolor=ACCENT)
-        e.grid(row=r, column=1, sticky="we", pady=(0, 9), ipady=4)
+        e.grid(row=r, column=1, sticky="we", pady=(0, 7), ipady=3)
         return e
 
     def _build(self):
-        f = tk.Frame(self, bg=BG, padx=18, pady=16)
-        f.pack(fill="both", expand=True)
+        # 外层：固定尺寸容器，底部固定按钮栏，中间为可滚动 canvas
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="both", expand=True)
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        # Canvas + 滚动条
+        self._canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(outer, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        vsb.grid(row=0, column=1, sticky="ns", pady=(8, 0))
+
+        f = tk.Frame(self._canvas, bg=BG, padx=14, pady=12)
+        self._canvas_window = self._canvas.create_window((0, 0), window=f, anchor="nw",
+                                                         width=self._dlg_w - 48)
+        f.bind("<Configure>", lambda e: self._canvas.configure(
+            scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<Configure>", lambda e: self._on_dlg_configure())
+        # 鼠标滚轮绑定
+        def _on_mousewheel(event):
+            try:
+                self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        self.bind_all("<MouseWheel>", _on_mousewheel)
+
         f.columnconfigure(1, weight=1)
         tk.Label(f, text="下载设置", bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         fr = tk.Frame(f, bg=BG)
-        fr.grid(row=1, column=1, sticky="we", pady=(0, 9))
+        fr.grid(row=1, column=1, sticky="we", pady=(0, 7))
         tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
                  relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=4)
+                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True, ipady=3)
         tk.Button(fr, text="浏览", command=lambda: self._pick(self.v_dir),
                   font=(FONT, 9), bg="#eef1f6", fg=FG, relief="flat", padx=10,
                   cursor="hand2").pack(side="left", padx=(6, 0))
@@ -513,7 +555,7 @@ class SettingsDialog(Dialog):
         self._lbl(f, "同时下载任务数", 3)
         self._ent(f, self.v_limit, 4, 8)
         tk.Label(f, text="= 全局限速（KB/s，0 表示不限速）", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(0, 9))
+                 font=(FONT, 8)).grid(row=4, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
         self._lbl(f, "全局限速", 4)
         self._ent(f, self.v_proxy, 5)
         self._lbl(f, "代理服务器", 5)
@@ -521,28 +563,28 @@ class SettingsDialog(Dialog):
         self._lbl(f, "User-Agent", 6)
         self._ent(f, self.v_port, 7, 8)
         tk.Label(f, text="浏览器扩展对接端口", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=7, column=2, sticky="w", padx=(8, 0), pady=(0, 9))
+                 font=(FONT, 8)).grid(row=7, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
         self._lbl(f, "本地接口端口", 7)
         cb1 = tk.Checkbutton(f, text="任务完成后自动清理临时分片", variable=self.v_tmp, bg=BG,
                              fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb1.grid(row=8, column=1, sticky="w", pady=(0, 6))
+        cb1.grid(row=8, column=1, sticky="w", pady=(0, 4))
         cb2 = tk.Checkbutton(f, text="忽略 HTTPS 证书错误（不推荐）", variable=self.v_insecure, bg=BG,
                              fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb2.grid(row=9, column=1, sticky="w", pady=(0, 6))
+        cb2.grid(row=9, column=1, sticky="w", pady=(0, 4))
         cb5 = tk.Checkbutton(f, text="剪贴板监听（复制链接自动弹新建下载）",
                              variable=self.v_clipboard, bg=BG,
                              fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb5.grid(row=10, column=1, sticky="w", pady=(0, 6))
+        cb5.grid(row=10, column=1, sticky="w", pady=(0, 4))
 
         # ---- v3.0.0: 引擎选择 + BT 设置 ----
         tk.Frame(f, bg=BORDER, height=1).grid(row=11, column=0, columnspan=3,
-                                              sticky="we", pady=(10, 8))
+                                              sticky="we", pady=(8, 6))
         tk.Label(f, text="下载引擎 / BT 磁力", bg=BG, fg=FG,
                  font=(FONT, 10, "bold")).grid(row=12, column=0, columnspan=3,
-                                               sticky="w", pady=(0, 8))
+                                               sticky="w", pady=(0, 6))
         # 引擎单选
         eng_frame = tk.Frame(f, bg=BG)
-        eng_frame.grid(row=13, column=1, sticky="w", pady=(0, 6))
+        eng_frame.grid(row=13, column=1, sticky="w", pady=(0, 4))
         tk.Radiobutton(eng_frame, text="内置多线程引擎（默认，最快）",
                        variable=self.v_engine, value="builtin",
                        bg=BG, fg=FG, font=(FONT, 9),
@@ -556,35 +598,35 @@ class SettingsDialog(Dialog):
         self._ent(f, self.v_bt_source, 14, 38)
         self._lbl(f, "BT Trackers 源", 14)
         tk.Label(f, text="每次启动时自动从此地址拉取最新 trackers", bg=BG, fg=FG_DIM,
-                 font=(FONT, 8)).grid(row=14, column=2, sticky="w", padx=(8, 0), pady=(0, 9))
+                 font=(FONT, 8)).grid(row=14, column=2, sticky="w", padx=(8, 0), pady=(0, 7))
         # 自动更新开关
         cb_bt = tk.Checkbutton(f, text="启动时自动更新 BT trackers（推荐）",
                                variable=self.v_bt_autoupdate, bg=BG,
                                fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb_bt.grid(row=15, column=1, sticky="w", pady=(0, 6))
+        cb_bt.grid(row=15, column=1, sticky="w", pady=(0, 4))
         # v3.0.2: tracker 测速过滤开关（默认开启）
         cb_bt_probe = tk.Checkbutton(f, text="BT Tracker 测速过滤（只保留可达 tracker，推荐开启）",
                                      variable=self.v_bt_probe_alive, bg=BG,
                                      fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
-        cb_bt_probe.grid(row=16, column=1, sticky="w", pady=(0, 6))
+        cb_bt_probe.grid(row=16, column=1, sticky="w", pady=(0, 4))
 
         # ---- 系统集成 ----
-        tk.Frame(f, bg=BORDER, height=1).grid(row=16, column=0, columnspan=3,
-                                              sticky="we", pady=(10, 8))
+        tk.Frame(f, bg=BORDER, height=1).grid(row=17, column=0, columnspan=3,
+                                              sticky="we", pady=(8, 6))
         tk.Label(f, text="系统集成（让浏览器点击下载自动唤起）", bg=BG, fg=FG,
-                 font=(FONT, 10, "bold")).grid(row=17, column=0, columnspan=3,
-                                               sticky="w", pady=(0, 8))
+                 font=(FONT, 10, "bold")).grid(row=18, column=0, columnspan=3,
+                                               sticky="w", pady=(0, 6))
         cb3 = tk.Checkbutton(f, text="开机自启（后台静默运行，不弹窗）",
                              variable=self.v_autostart, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb3.grid(row=18, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb3.grid(row=19, column=0, columnspan=2, sticky="w", pady=(0, 4))
         cb4 = tk.Checkbutton(f, text="注册 xzd:// 协议（扩展可唤起下载器）",
                              variable=self.v_protocol, bg=BG, fg=FG, font=(FONT, 9),
                              activebackground=BG, selectcolor="#fff")
-        cb4.grid(row=19, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        cb4.grid(row=20, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
-                               justify="left", wraplength=470)
-        self.lbl_si.grid(row=20, column=0, columnspan=3, sticky="w", pady=(2, 6))
+                               justify="left", wraplength=420)
+        self.lbl_si.grid(row=21, column=0, columnspan=3, sticky="w", pady=(2, 4))
         if self.si is None:
             cb3.config(state="disabled")
             cb4.config(state="disabled")
@@ -593,14 +635,16 @@ class SettingsDialog(Dialog):
             self._refresh_si_label()
 
         tk.Label(f, text="全程离线：不检查更新、不联网校验、不上报任何数据",
-                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=21, column=0, columnspan=3,
-                                                      sticky="w", pady=(6, 12))
-        btns = tk.Frame(f, bg=BG)
-        btns.grid(row=22, column=0, columnspan=3, sticky="e")
+                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=22, column=0, columnspan=3,
+                                                      sticky="w", pady=(4, 8))
+
+        # 底部按钮栏（固定，不随内容滚动）
+        btns = tk.Frame(outer, bg=BG)
+        btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=18, pady=(8, 12))
         tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
-                  fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left", padx=6)
+                  fg=FG, relief="flat", padx=18, pady=4, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="保存", command=self._ok, font=(FONT, 10, "bold"), bg=ACCENT,
-                  fg="#fff", relief="flat", padx=18, pady=5, activebackground=ACCENT_DARK,
+                  fg="#fff", relief="flat", padx=18, pady=4, activebackground=ACCENT_DARK,
                   cursor="hand2").pack(side="left")
 
     def _refresh_si_label(self):

@@ -35,7 +35,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.0.4"
+VERSION = "3.0.5"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
