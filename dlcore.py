@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.0.8"
+ENGINE_VERSION = "3.1.0"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -966,7 +966,24 @@ class DownloadTask:
         self._tick_t = now()
         self._tick_b = 0
         self._run_thread: threading.Thread | None = None
-        self._zombie_hits = 0            # 僵尸巡检计数（v1.11.0，见 Manager._reap_dead_tasks）
+        self._zombie_hits = 0            # 僵尸巡检计数（v1.11.0，见 Manager._reap_dead_tasks)
+
+    def set_target_conns(self, n: int):
+        """运行时调整目标线程数（速度均衡调度器调用）。"""
+        n = max(0, min(32, int(n)))
+        if isinstance(self, FileDownload):
+            with self._target_lock:
+                old = getattr(self, "target", 1)
+                self.target = n
+                if n > old and self.state == STATE_DOWNLOADING:
+                    need = n - self.active_conns()
+                    if need > 0:
+                        self._spawn_workers(need)
+                # 降低时 _worker 自行判断 active_conns() > target 后退出
+        else:
+            self.target = n
+        # HLS / BT / aria2 当前仅记录目标数；它们使用独立线程池/子进程，
+        # 动态调整粒度较大，后续如需要再扩展
 
     # ---- 控制 ----
     def start(self):
@@ -1133,6 +1150,10 @@ class DownloadTask:
                 # 需要执行：先抢并发槽位
                 if not self.mgr.acquire_slot(self):
                     continue
+                # 获得槽位后若被重平衡为 0（理论上不应发生），则释放并继续等待
+                if self.mgr.fair_target_conns(self) <= 0:
+                    self.mgr.release_slot(self)
+                    continue
                 self.state = STATE_DOWNLOADING
                 try:
                     self._session()
@@ -1256,6 +1277,7 @@ class FileDownload(DownloadTask):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.kind = "file"
+        self._target_lock = threading.Lock()   # 保护 target 的动态调整
         self.bitmap: bytearray | None = None
         self.nblocks = 0
         self.block_size = BLOCK_SIZE
@@ -1577,11 +1599,19 @@ class FileDownload(DownloadTask):
             self._finalize()
             return
 
-        self.target = max(1, min(32, self.requested_conns))
-        # v3.0.8: 速度均衡——多任务并行时动态降低线程数，避免某个任务无响应
-        fair = self.mgr.fair_target_conns(self)
-        if fair < self.target:
-            self.target = fair
+        with self._target_lock:
+            self.target = max(1, min(32, self.requested_conns))
+            # v3.1.0: 速度均衡——动态 80% 链式递减调度
+            fair = self.mgr.fair_target_conns(self)
+            if fair <= 0:
+                # 当前任务在并发槽位之外，先不启动工作线程，等待槽位释放
+                self.state = STATE_WAIT
+                self.phase = "排队中（等待并发槽位）"
+                self.mgr.release_slot(self)
+                self.mgr.notify()
+                return
+            if fair < self.target:
+                self.target = fair
         self._stop_workers = False
         self._spawn_workers(self.target)
         last_save = now()
@@ -1633,10 +1663,16 @@ class FileDownload(DownloadTask):
                 self._save_state()
                 self._finalize()
                 return
-            # 目标连接数变化 → 增/减线程
+            # 目标连接数变化 → 增/减线程（速度均衡动态调度）
             alive = sum(1 for t in self._workers if t.is_alive())
-            if self.target > alive:
-                self._spawn_workers(self.target - alive)
+            # 周期性根据当前全局状态重新校准目标线程数
+            fair = self.mgr.fair_target_conns(self)
+            with self._target_lock:
+                if fair > 0 and fair != self.target:
+                    self.target = fair
+                current_target = self.target
+            if current_target > alive:
+                self._spawn_workers(current_target - alive)
             # 完成一批区块后可能有大量空闲线程 → 让线程自然退出
             if now() - last_save >= BITMAP_SAVE_INTERVAL:
                 self._save_state()
@@ -1646,7 +1682,9 @@ class FileDownload(DownloadTask):
                 self._last_progress_b = self.done_bytes
             elif now() - self._last_progress_t > 45 and alive == 0 and not self._is_done():
                 # 全部线程退出但没下完 → 再补一轮
-                self._spawn_workers(max(1, min(4, self.target)))
+                with self._target_lock:
+                    current_target = max(1, self.target)
+                self._spawn_workers(max(1, min(4, current_target)))
                 if now() - self._last_progress_t > 120:
                     self.state = STATE_ERROR
                     self.err = "长时间无数据进展，已停止重试。可右键任务 → 用 aria2c 极速重试"
@@ -1665,10 +1703,15 @@ class FileDownload(DownloadTask):
         return sum(1 for t in self._workers if t.is_alive())
 
     def target_conns(self) -> int:
-        return self.target
+        with self._target_lock:
+            return self.target
 
     def _spawn_workers(self, k: int):
-        for _ in range(int(k)):
+        with self._target_lock:
+            if self.target <= 0:
+                return
+            k = min(int(k), 32 - len(self._workers))
+        for _ in range(max(0, k)):
             t = threading.Thread(target=self._worker, daemon=True,
                                  name=f"xzd-{self.tid}")
             self._workers.append(t)
@@ -1770,7 +1813,9 @@ class FileDownload(DownloadTask):
                 if self.state in (STATE_PAUSED, STATE_CANCELLED):
                     return
                 # 线程数超出目标 → 自行退出（等调度器再拉起）
-                if self.active_conns() > self.target:
+                with self._target_lock:
+                    current_target = self.target
+                if self.active_conns() > current_target:
                     return
                 with self._qlock:
                     if not self._queue:
@@ -3138,7 +3183,13 @@ class Manager:
                             self._slot_holders.discard(htid)
                 if len(self._slot_holders) < max_slots:
                     self._slot_holders.add(task.tid)
+                    task._slot_since = time.time()
                     self._slot_wait_start.pop(task.tid, None)
+                    # 获得槽位后重新平衡所有活动任务的线程数
+                    try:
+                        self._rebalance_targets()
+                    except Exception:
+                        LOG.debug('忽略异常：_rebalance_targets()')
                     return True
                 # 公平调度：等待最久的任务优先获得槽位（避免后加任务饿死）
                 now_t = time.time()
@@ -3169,6 +3220,11 @@ class Manager:
             self._slot_holders.discard(task.tid)
             self._slot_wait_start.pop(task.tid, None)
             self._cv.notify_all()
+        # 槽位变化会改变速度均衡结果，触发一次重平衡
+        try:
+            self._rebalance_targets()
+        except Exception:
+            LOG.debug('忽略异常：_rebalance_targets()')
 
     def on_task_end(self, task: DownloadTask):
         self.release_slot(task)
@@ -3259,28 +3315,54 @@ class Manager:
         return self.tasks.get(tid)
 
     def fair_target_conns(self, task: DownloadTask) -> int:
-        """速度均衡：单任务时跑满带宽，多任务并行时避免某个任务饿死。
+        """速度均衡：单任务跑满，多任务按 80% 链式递减，最多同时跑 3 个，其余排队。
 
-        规则：
-          · 当前活动任务数 ≤ 并发槽位数：每个任务按自己请求的线程数跑
-          · 任务数超过槽位：总线程预算 = 槽位数 × 8，平均分配，
-            但最少保留 4 线程，确保每个任务都有响应
+        规则（以默认 max_parallel_tasks=3、requested_conns=24 为例）：
+          · 第 1 个任务：requested_conns（满速）
+          · 第 2 个任务：第 1 个的 80%（向下取整，最少 4）
+          · 第 3 个任务：第 2 个的 80%
+          · 第 4 个及以后：排队，目标线程数 = 0（不占用带宽）
+          · 当某个任务完成退出，剩余任务按上述链式重新计算并递补
         """
+        max_slots = max(1, min(8, int(self.cfg.get("max_parallel_tasks", 3))))
+        with self._lock:
+            # 只统计真正在争用带宽的任务
+            active = [t for t in self.tasks.values()
+                      if t.state in (STATE_DOWNLOADING, STATE_WAIT, STATE_PENDING)]
+            # 按获得槽位的时间排序；未获得槽位的按加入时间排
+            active.sort(key=lambda t: (
+                0 if getattr(t, '_slot_since', 0) else 1,
+                getattr(t, '_slot_since', t.added_at)
+            ))
+            try:
+                idx = active.index(task)
+            except ValueError:
+                idx = len(active)
+
+        # 当前任务在并发槽位之外 → 不给线程（排队）
+        if idx >= max_slots:
+            return 0
+
+        # 链式 80% 递减：从第 1 个满速任务开始，逐级 ×0.8
+        base = int(self.cfg.get("connections", 24))
+        fair = base
+        for _ in range(idx):
+            fair = max(4, int(fair * 0.8))
+
+        # 插队任务额外奖励 2 线程（最多到 requested_conns）
+        if getattr(task, "_priority", False):
+            fair = min(task.requested_conns, fair + 2)
+        return min(task.requested_conns, fair)
+
+    def _rebalance_targets(self):
+        """重新计算所有下载中/等待中任务的目标线程数，并应用。"""
         with self._lock:
             active = [t for t in self.tasks.values()
                       if t.state in (STATE_DOWNLOADING, STATE_WAIT, STATE_PENDING)]
-            n = len(active)
-        if n <= 0:
-            return task.requested_conns
-        max_slots = max(1, int(self.cfg.get("max_parallel_tasks", 3)))
-        if n <= max_slots:
-            return task.requested_conns
-        total_budget = max_slots * 8
-        fair = max(4, total_budget // n)
-        # 插队任务额外加 4 线程作为奖励
-        if getattr(task, "_priority", False):
-            fair += 4
-        return min(task.requested_conns, fair)
+            active.sort(key=lambda t: getattr(t, '_slot_since', t.added_at))
+        for t in active:
+            fair = self.fair_target_conns(t)
+            t.set_target_conns(fair)
 
     def add_connections(self, task: DownloadTask, k: int = 8) -> bool:
         if not isinstance(task, FileDownload) or task.state != STATE_DOWNLOADING:

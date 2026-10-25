@@ -23,6 +23,91 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dlcore
 
 
+class FakeTask:
+    """用于测试 Manager 调度算法的轻量任务桩。"""
+    def __init__(self, added_at=0.0, priority=False, requested_conns=24):
+        self.added_at = added_at
+        self._slot_since = 0.0
+        self._priority = priority
+        self.requested_conns = requested_conns
+        self.tid = f"t{added_at}"
+        self.state = dlcore.STATE_DOWNLOADING
+        self.target = requested_conns
+        self._stop = False
+
+    def set_target_conns(self, n: int):
+        self.target = n
+
+
+class TestFairTargetConns(unittest.TestCase):
+    def _make_manager(self, max_slots=3, connections=24):
+        m = dlcore.Manager(data_dir=tempfile.mkdtemp())
+        m.cfg["max_parallel_tasks"] = max_slots
+        m.cfg["connections"] = connections
+        return m
+
+    def test_single_task_full_speed(self):
+        m = self._make_manager()
+        t = FakeTask(added_at=1.0)
+        m.tasks = {t.tid: t}
+        self.assertEqual(m.fair_target_conns(t), 24)
+
+    def test_two_tasks_80_percent_chain(self):
+        m = self._make_manager()
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0)
+        m.tasks = {t1.tid: t1, t2.tid: t2}
+        # t1 排第 0，满速；t2 排第 1，24 * 0.8 = 19（向下取整）
+        self.assertEqual(m.fair_target_conns(t1), 24)
+        self.assertEqual(m.fair_target_conns(t2), 19)
+
+    def test_three_tasks_chain(self):
+        m = self._make_manager()
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0)
+        t3 = FakeTask(added_at=3.0)
+        m.tasks = {t1.tid: t1, t2.tid: t2, t3.tid: t3}
+        self.assertEqual(m.fair_target_conns(t1), 24)
+        self.assertEqual(m.fair_target_conns(t2), 19)
+        self.assertEqual(m.fair_target_conns(t3), 15)  # 19 * 0.8 = 15
+
+    def test_fourth_task_queued(self):
+        m = self._make_manager()
+        tasks = [FakeTask(added_at=i) for i in range(1, 5)]
+        m.tasks = {t.tid: t for t in tasks}
+        self.assertEqual(m.fair_target_conns(tasks[3]), 0)
+
+    def test_rebalance_after_first_done(self):
+        m = self._make_manager()
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0)
+        t3 = FakeTask(added_at=3.0)
+        t4 = FakeTask(added_at=4.0)
+        m.tasks = {t1.tid: t1, t2.tid: t2, t3.tid: t3, t4.tid: t4}
+        # 模拟 t1 完成退出
+        t1.state = dlcore.STATE_DONE
+        self.assertEqual(m.fair_target_conns(t2), 24)
+        self.assertEqual(m.fair_target_conns(t3), 19)
+        self.assertEqual(m.fair_target_conns(t4), 15)
+
+    def test_min_4_threads(self):
+        m = self._make_manager(max_slots=3, connections=4)
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0)
+        t3 = FakeTask(added_at=3.0)
+        m.tasks = {t1.tid: t1, t2.tid: t2, t3.tid: t3}
+        self.assertEqual(m.fair_target_conns(t1), 4)
+        self.assertEqual(m.fair_target_conns(t2), 4)
+        self.assertEqual(m.fair_target_conns(t3), 4)
+
+    def test_priority_bonus(self):
+        m = self._make_manager()
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0, priority=True)
+        m.tasks = {t1.tid: t1, t2.tid: t2}
+        self.assertEqual(m.fair_target_conns(t2), 19 + 2)
+
+
 class TestHumanSize(unittest.TestCase):
     def test_bytes(self):
         self.assertEqual(dlcore.human_size(0), "0 B")
