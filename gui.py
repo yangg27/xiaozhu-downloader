@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.6.2
+小助下载器 · 图形界面  gui.py   v2.6.3
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -466,6 +468,8 @@ class SettingsDialog(Dialog):
         super().__init__(master, "设置", 560, 540, resizable=True, scrollable=True)
         self.mgr = mgr
         self.app = app
+        self._entries: dict[str, tk.Entry] = {}
+        self._errors: dict[str, tk.Label] = {}
         c = mgr.cfg
         self.v_dir = tk.StringVar(value=c.get("download_dir", ""))
         self.v_conns = tk.IntVar(value=int(c.get("connections", 24)))
@@ -502,12 +506,72 @@ class SettingsDialog(Dialog):
         tk.Label(p, text=t, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=r, column=0, sticky="w", pady=(0, 7))
 
-    def _ent(self, p, var, r, w=30):
-        e = tk.Entry(p, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
+    def _ent(self, p, var, r, w=30, name=""):
+        """v3.0.8: 带实时校验的输入框，错误时边框变红并在下方显示提示。"""
+        fr = tk.Frame(p, bg=BG)
+        fr.grid(row=r, column=1, sticky="we", pady=(0, 7))
+        e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
                      relief="solid", bd=1, highlightthickness=1,
                      highlightbackground=BORDER, highlightcolor=ACCENT)
-        e.grid(row=r, column=1, sticky="we", pady=(0, 7), ipady=3)
+        e.pack(side="top", fill="x", ipady=3)
+        err = tk.Label(fr, text="", bg=BG, fg=ERR, font=(FONT, 8))
+        err.pack(side="top", anchor="w")
+        key = name or f"row{r}"
+        self._entries[key] = e
+        self._errors[key] = err
+        e.bind("<KeyRelease>", lambda ev, k=key: self._validate(k))
+        e.bind("<FocusOut>", lambda ev, k=key: self._validate(k))
         return e
+
+    def _validate(self, key: str) -> bool:
+        """实时校验单个输入框，返回是否通过。"""
+        e = self._entries.get(key)
+        err = self._errors.get(key)
+        if e is None or err is None:
+            return True
+        txt = e.get().strip()
+        ok, msg = True, ""
+        if key == "row2":
+            try:
+                v = int(txt)
+                if not (1 <= v <= 32):
+                    raise ValueError
+            except ValueError:
+                ok, msg = False, "默认线程数必须是 1-32 的整数"
+        elif key == "row3":
+            try:
+                v = int(txt)
+                if not (1 <= v <= 20):
+                    raise ValueError
+            except ValueError:
+                ok, msg = False, "同时下载任务数必须是 1-20 的整数"
+        elif key == "row4":
+            try:
+                v = int(txt)
+                if v < 0:
+                    raise ValueError
+            except ValueError:
+                ok, msg = False, "全局限速必须是大于等于 0 的整数（KB/s）"
+        elif key == "row7":
+            try:
+                v = int(txt)
+                if not (1024 <= v <= 65535):
+                    raise ValueError
+            except ValueError:
+                ok, msg = False, "本地接口端口必须是 1024-65535 的整数"
+        elif key == "row5":
+            if txt and not re.match(r"^(https?|socks5?)://", txt, re.I):
+                ok, msg = False, "代理格式形如 http://127.0.0.1:7890 或留空"
+        elif key == "row6":
+            if not txt:
+                ok, msg = False, "User-Agent 不能为空"
+        elif key == "row14":
+            if txt and not txt.lower().startswith(("http://", "https://")):
+                ok, msg = False, "Tracker 源必须是 http:// 或 https:// 链接"
+        color = ERR if not ok else BORDER
+        e.config(highlightbackground=color)
+        err.config(text=msg)
+        return ok
 
     def _build(self):
         # 外层：固定尺寸容器，底部固定按钮栏，中间为可滚动 canvas
@@ -536,6 +600,9 @@ class SettingsDialog(Dialog):
             except Exception:
                 pass
         self.bind_all("<MouseWheel>", _on_mousewheel)
+        # v3.0.8: 截图快捷键 Ctrl+Alt+P，保存默认设置截图到安装目录
+        self.bind("<Control-Alt-p>", lambda e: self._save_screenshot())
+        self.bind("<Control-Alt-P>", lambda e: self._save_screenshot())
 
         f.columnconfigure(1, weight=1)
         tk.Label(f, text="下载设置", bg=BG, fg=FG, font=(FONT, 10, "bold")).grid(
@@ -681,6 +748,31 @@ class SettingsDialog(Dialog):
         # 系统集成保持现状（用户可能只是想重置下载设置）
         messagebox.showinfo("恢复默认设置", "已恢复默认设置，点击“保存”后生效。")
 
+    def _save_screenshot(self):
+        """把当前设置窗口截图保存为安装目录下的 default-settings.png。"""
+        try:
+            from PIL import ImageGrab
+        except Exception as e:
+            messagebox.showwarning("截图失败", f"缺少 PIL 库：{e}\n请安装 pillow 后重试。",
+                                   parent=self)
+            return
+        try:
+            self.update_idletasks()
+            x = self.winfo_rootx()
+            y = self.winfo_rooty()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            if dlcore.is_frozen():
+                root_dir = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                root_dir = dlcore.app_root()
+            path = os.path.join(root_dir, "default-settings.png")
+            img.save(path)
+            messagebox.showinfo("截图已保存", f"默认设置截图已保存到：\n{path}", parent=self)
+        except Exception as e:
+            messagebox.showwarning("截图失败", f"保存截图时出错：{e}", parent=self)
+
     def _refresh_si_label(self):
         if not self.si:
             return
@@ -700,6 +792,10 @@ class SettingsDialog(Dialog):
             var.set(os.path.normpath(d))
 
     def _ok(self):
+        all_ok = all(self._validate(k) for k in self._entries)
+        if not all_ok:
+            messagebox.showwarning("输入有误", "请修正标红的设置项后再保存。", parent=self)
+            return
         try:
             limit = max(0, int(self.v_limit.get() or 0)) * 1024
         except Exception:
@@ -723,7 +819,7 @@ class SettingsDialog(Dialog):
         )
         # 剪贴板监听开关立即生效
         if self.app:
-            self.app._clip_enabled = bool(self.v_clipboard.get())
+            self.app._toggle_clipboard(bool(self.v_clipboard.get()))
         # 限速立即应用于进行中的任务
         for t in self.mgr.tasks.values():
             if t.speed_limit or limit:
@@ -912,6 +1008,8 @@ class HelpDialog(Dialog):
         # 默认设置截图占位
         tk.Label(f, text="默认设置截图", bg=BG, fg=FG,
                  font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
+        tk.Label(f, text="在设置页面按 Ctrl+Alt+P 可保存当前截图到安装目录。",
+                 bg=BG, fg=FG_DIM, font=(FONT, 8)).pack(anchor="w", pady=(0, 6))
         self._img_lbl = tk.Label(f, text="未找到默认设置截图", bg="#eef1f6", fg=FG_DIM,
                                  font=(FONT, 9), width=60, height=12, relief="flat")
         self._img_lbl.pack(anchor="w", pady=(0, 8))
@@ -927,8 +1025,11 @@ class HelpDialog(Dialog):
         """加载安装目录下的 default-settings.png，若不存在则显示提示。"""
         candidates = [
             os.path.join(dlcore.app_root(), "default-settings.png"),
-            os.path.join(dlcore.app_root(), "browser-extension", "default-settings.png"),
         ]
+        if dlcore.is_frozen():
+            candidates.insert(0, os.path.join(os.path.dirname(os.path.abspath(sys.executable)),
+                                              "default-settings.png"))
+        candidates.append(os.path.join(dlcore.app_root(), "browser-extension", "default-settings.png"))
         path = ""
         for c in candidates:
             if os.path.exists(c):
@@ -1081,6 +1182,11 @@ class App:
     def __init__(self, silent: bool = False, protocol_url: str = ""):
         self.silent = silent
         self.protocol_url = protocol_url or ""
+        # v3.0.8: 开启 DPI 感知，解决 125%/150% 缩放下字体图标模糊
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
         self.root = tk.Tk()
         boot_mark("tk_ready")
         self.root.title(f"{dlcore.APP_NAME} v{dlcore.ENGINE_VERSION}")
@@ -1149,8 +1255,10 @@ class App:
         # ---- 剪贴板监听（复制 URL 自动弹新建下载）----
         self._clip_last = ""
         self._clip_enabled = self.mgr.cfg.get("clipboard_watch", True)
+        self._clip_native = None
+        self._clip_fallback_thread = None
         if self._clip_enabled:
-            threading.Thread(target=self._clipboard_watch, daemon=True).start()
+            self._start_clipboard_listener()
 
     def _write_pid(self):
         try:
@@ -1396,6 +1504,9 @@ class App:
                              font=(FONT, 9, "bold"))
         self.ctx.add_command(label="⏸ 暂停", command=self.pause_selected,
                              font=(FONT, 9, "bold"))
+        self.ctx.add_separator()
+        # v3.0.8: 插队能力
+        self.ctx.add_command(label="⏫ 插队优先", command=self.jump_selected)
         self.ctx.add_separator()
         self.ctx.add_command(label="增加 8 个线程", command=lambda: self.boost_selected(8))
         self.ctx.add_command(label="增加 16 个线程", command=lambda: self.boost_selected(16))
@@ -1734,6 +1845,19 @@ class App:
             self.root.clipboard_append(t.url)
             self.lbl_status.config(text="下载链接已复制到剪贴板")
 
+    def jump_selected(self):
+        """v3.0.8: 把选中任务提到队列最前（插队）。"""
+        tids = self._selected_tids()
+        if not tids:
+            return
+        n = 0
+        for tid in tids:
+            if self.mgr.jump_queue(tid):
+                n += 1
+        if n:
+            self.lbl_status.config(text=f"已插队 {n} 个任务到最前")
+        self.refresh_now()
+
     def _open_selected(self):
         for tid in self._selected_tids():
             t = self.mgr.get(tid)
@@ -1893,6 +2017,50 @@ class App:
             _safe_console(f"[{dlcore.APP_NAME}] 已恢复 {self.restored} 个未完成任务（可继续下载）")
         self.root.mainloop()
 
+    def _start_clipboard_listener(self):
+        """v3.0.8: 优先使用 Windows 原生剪贴板事件，失败则回退到轮询。"""
+        try:
+            listener = ClipboardListener(self._on_clipboard_event)
+            if listener.start():
+                self._clip_native = listener
+                self._poll_clipboard_queue()
+                return
+        except Exception:
+            dlcore.LOG.debug("原生剪贴板监听启动失败，将使用轮询兜底")
+        # 兜底：后台线程轮询
+        self._clip_fallback_thread = threading.Thread(
+            target=self._clipboard_watch, daemon=True)
+        self._clip_fallback_thread.start()
+
+    def _on_clipboard_event(self):
+        """原生事件回调（在后台线程被调用）：调度到主线程读取剪贴板。"""
+        try:
+            if self._clip_enabled and self.root:
+                self.root.after(0, lambda: self._clipboard_poll(force=True))
+        except Exception:
+            pass
+
+    def _poll_clipboard_queue(self):
+        """原生监听模式下不再需要此轮询，但保留一次兜底检查。"""
+        if self._clip_enabled and self._clip_native:
+            self.root.after(2000, self._poll_clipboard_queue)
+
+    def _toggle_clipboard(self, enabled: bool):
+        """v3.0.8: 根据设置启停剪贴板监听。"""
+        self._clip_enabled = enabled
+        if enabled:
+            if (self._clip_native is None and
+                (self._clip_fallback_thread is None or not self._clip_fallback_thread.is_alive())):
+                self._start_clipboard_listener()
+        else:
+            if self._clip_native:
+                try:
+                    self._clip_native.stop()
+                except Exception:
+                    pass
+                self._clip_native = None
+            self._clip_fallback_thread = None
+
     # ---- 剪贴板监听 ----
     def _clipboard_watch(self):
         """后台线程：每 1.5s 提醒主线程检查一次剪贴板。
@@ -1910,27 +2078,58 @@ class App:
             except Exception:
                 continue
 
-    def _clipboard_poll(self):
+    def _clipboard_poll(self, force: bool = False):
         """主线程：读取剪贴板，发现新 URL 且未在下载列表中则弹新建下载。
 
         去重规则：同一 URL 只有在已存在“未完成 / 下载中 / 等待中 / 已暂停”
         任务时才跳过；已取消/已失败/已完成的 URL 再次复制仍会触发弹窗，
         让用户重新确认是否下载。
         """
-        import re
-        url_re = re.compile(r"^https?://|magnet:\?", re.I)
         try:
             txt = self.root.clipboard_get().strip()
         except Exception:
             return
-        if not txt or txt == self._clip_last:
+        if not txt:
+            return
+        if not force and txt == self._clip_last:
             return
         self._clip_last = txt
-        if not url_re.match(txt):
+        if not self._is_clipboard_download_url(txt):
             return
         if self._clip_url_already_active(txt):
             return
         self._on_clip_url(txt)
+
+    @staticmethod
+    def _is_clipboard_download_url(txt: str) -> bool:
+        """区分普通网页地址和下载链接。"""
+        if not txt:
+            return False
+        low = txt.lower()
+        if low.startswith("magnet:?"):
+            return True
+        if low.endswith(".torrent"):
+            return True
+        # 简单 URL 解析：带查询或路径以可下载扩展名结尾
+        try:
+            from urllib.parse import urlsplit
+            path = urlsplit(txt).path.lower().split("?")[0]
+        except Exception:
+            path = ""
+        download_exts = (
+            ".zip", ".rar", ".7z", ".tar", ".gz", ".xz", ".bz2", ".iso",
+            ".exe", ".msi", ".apk", ".ipa", ".dmg", ".pkg", ".bin", ".dat",
+            ".mp4", ".webm", ".mkv", ".flv", ".mov", ".avi", ".ts", ".m3u8", ".mpd",
+            ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+            ".txt", ".csv", ".json", ".xml", ".html", ".htm",
+        )
+        if path.endswith(download_exts):
+            return True
+        # 常见下载特征
+        if "/download" in low or "/attachment" in low or "?download=1" in low:
+            return True
+        return False
 
     def _on_clip_url(self, url: str):
         """剪贴板发现 URL，弹新建下载（自动填好链接）。"""
@@ -1948,6 +2147,87 @@ class App:
             if s.get("url") == url and s.get("state") in active_states:
                 return True
         return False
+
+
+class ClipboardListener:
+    """v3.0.8: Windows 原生剪贴板事件监听（零 CPU 轮询）。"""
+
+    WM_CLIPBOARDUPDATE = 0x031D
+    WM_DESTROY = 0x0002
+
+    _WNDPROC = ctypes.WINFUNCTYPE(
+        ctypes.wintypes.LRESULT,
+        ctypes.wintypes.HWND,
+        ctypes.wintypes.UINT,
+        ctypes.wintypes.WPARAM,
+        ctypes.wintypes.LPARAM)
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self._hwnd = None
+        self._thread = None
+        self._running = threading.Event()
+        self._proc_ref = self._WNDPROC(self._wndproc)
+
+    def start(self) -> bool:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self._running.wait(timeout=2.0)
+
+    def stop(self):
+        if self._hwnd:
+            try:
+                ctypes.windll.user32.PostMessageW(self._hwnd, self.WM_DESTROY, 0, 0)
+            except Exception:
+                pass
+
+    def _run(self):
+        try:
+            hinst = ctypes.windll.kernel32.GetModuleHandleW(None)
+            wc = ctypes.wintypes.WNDCLASSW()
+            wc.lpfnWndProc = self._proc_ref
+            wc.lpszClassName = "XZDClipboardListener"
+            wc.hInstance = hinst
+            atom = ctypes.windll.user32.RegisterClassW(ctypes.byref(wc))
+            if not atom:
+                return
+            hwnd = ctypes.windll.user32.CreateWindowExW(
+                0, "XZDClipboardListener", "XZD Clipboard", 0,
+                0, 0, 0, 0, 0, 0, hinst, None)
+            if not hwnd:
+                return
+            self._hwnd = hwnd
+            if not ctypes.windll.user32.AddClipboardFormatListener(hwnd):
+                ctypes.windll.user32.DestroyWindow(hwnd)
+                self._hwnd = None
+                return
+            self._running.set()
+            msg = ctypes.wintypes.MSG()
+            while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
+                ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+        except Exception:
+            pass
+        finally:
+            try:
+                if self._hwnd:
+                    ctypes.windll.user32.RemoveClipboardFormatListener(self._hwnd)
+                    ctypes.windll.user32.DestroyWindow(self._hwnd)
+                    self._hwnd = None
+            except Exception:
+                pass
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == self.WM_CLIPBOARDUPDATE:
+            try:
+                self.on_change()
+            except Exception:
+                pass
+            return 0
+        if msg == self.WM_DESTROY:
+            ctypes.windll.user32.PostQuitMessage(0)
+            return 0
+        return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 
 def _safe_console(msg: str):

@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if os.path.basename(ROOT) == "_t":
@@ -75,6 +76,30 @@ def run():
             else:
                 shutil.copy2(src, dst)
             print(f"[build_app] 已复制: {name}")
+
+    # v3.0.8: 把 browser-extension 打包为 zip / crx，方便用户解压安装
+    ext_src = os.path.join(ROOT, "browser-extension")
+    if os.path.isdir(ext_src):
+        ext_zip = os.path.join(app_dir, "browser-extension.zip")
+        ext_crx = os.path.join(app_dir, "browser-extension.crx")
+        with zipfile.ZipFile(ext_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(ext_src):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    arc = os.path.relpath(full, ext_src)
+                    zf.write(full, arc)
+        shutil.copy2(ext_zip, ext_crx)
+        print("[build_app] 已打包 browser-extension.zip / .crx")
+
+    # v3.0.8: 生成带箭头标注的扩展安装指引图
+    guide_script = os.path.join(ROOT, "_t", "gen_extension_guide.py")
+    guide_out = os.path.join(app_dir, "extension-install-guide.png")
+    if os.path.exists(guide_script):
+        rc = subprocess.run([py, guide_script, guide_out]).returncode
+        if rc == 0:
+            print("[build_app] 已生成扩展安装指引图")
+        else:
+            print("[build_app] 扩展安装指引图生成失败", file=sys.stderr)
 
     # 顺手清理 PyInstaller 默认 dist/ 空目录
     try:

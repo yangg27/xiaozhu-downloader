@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.0.7"
+ENGINE_VERSION = "3.0.8"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1578,6 +1578,10 @@ class FileDownload(DownloadTask):
             return
 
         self.target = max(1, min(32, self.requested_conns))
+        # v3.0.8: 速度均衡——多任务并行时动态降低线程数，避免某个任务无响应
+        fair = self.mgr.fair_target_conns(self)
+        if fair < self.target:
+            self.target = fair
         self._stop_workers = False
         self._spawn_workers(self.target)
         last_save = now()
@@ -3051,6 +3055,8 @@ class Manager:
         self._lock = threading.RLock()
         self._cv = threading.Condition()
         self._slot_holders: set[str] = set()
+        # v3.0.8: waiting 任务开始等待的时间戳，用于公平槽位调度
+        self._slot_wait_start: dict[str, float] = {}
         # v3.0.7: 浏览器扩展下载记录（内存 + 持久化到 history.json）
         self._history: list[dict] = []
         self._history_path = os.path.join(self.data_dir, "history.json")
@@ -3118,19 +3124,50 @@ class Manager:
         with self._cv:
             while True:
                 if task._stop or task.state == STATE_CANCELLED:
+                    self._slot_wait_start.pop(task.tid, None)
                     return False
                 if task.tid in self._slot_holders:
+                    self._slot_wait_start.pop(task.tid, None)
                     return True
-                if len(self._slot_holders) < max(1, int(self.cfg.get("max_parallel_tasks", 3))):
+                max_slots = max(1, int(self.cfg.get("max_parallel_tasks", 3)))
+                # 清理已结束/已暂停任务占用的槽位
+                if len(self._slot_holders) >= max_slots:
+                    for htid in list(self._slot_holders):
+                        t = self.tasks.get(htid)
+                        if t is None or t.state in (STATE_DONE, STATE_CANCELLED, STATE_ERROR, STATE_PAUSED):
+                            self._slot_holders.discard(htid)
+                if len(self._slot_holders) < max_slots:
                     self._slot_holders.add(task.tid)
+                    self._slot_wait_start.pop(task.tid, None)
                     return True
+                # 公平调度：等待最久的任务优先获得槽位（避免后加任务饿死）
+                now_t = time.time()
+                self._slot_wait_start.setdefault(task.tid, now_t)
+                oldest_tid = min(self._slot_wait_start, key=lambda k: self._slot_wait_start[k], default=None)
+                if oldest_tid == task.tid:
+                    # 本任务等待最久，抢占一个持槽最久且当前非活动态的任务
+                    holders_by_age = sorted(
+                        self._slot_holders,
+                        key=lambda k: getattr(self.tasks.get(k), '_slot_since', 0),
+                        reverse=True)
+                    for htid in holders_by_age:
+                        t = self.tasks.get(htid)
+                        if t and t.state not in (STATE_DOWNLOADING,):
+                            self._slot_holders.discard(htid)
+                            break
+                    if len(self._slot_holders) < max_slots:
+                        self._slot_holders.add(task.tid)
+                        self._slot_wait_start.pop(task.tid, None)
+                        return True
                 if task.state == STATE_PAUSED:
+                    self._slot_wait_start.pop(task.tid, None)
                     return False
                 self._cv.wait(timeout=0.5)
 
     def release_slot(self, task: DownloadTask):
         with self._cv:
             self._slot_holders.discard(task.tid)
+            self._slot_wait_start.pop(task.tid, None)
             self._cv.notify_all()
 
     def on_task_end(self, task: DownloadTask):
@@ -3154,7 +3191,8 @@ class Manager:
                  conns: int | None = None, referer: str = "", cookie: str = "",
                  headers: dict | None = None, kind: str = "auto",
                  speed_limit: int | None = None, group: str = "",
-                 start: bool = True, extra: dict | None = None) -> DownloadTask:
+                 start: bool = True, extra: dict | None = None,
+                 priority: bool = False) -> DownloadTask:
         conns = int(conns if conns is not None else self.cfg.get("connections", 16))
         speed_limit = int(speed_limit if speed_limit is not None else self.cfg.get("speed_limit", 0))
         out_dir = os.path.abspath(out_dir or self.cfg.get("download_dir"))
@@ -3185,9 +3223,13 @@ class Manager:
                    insecure=bool(self.cfg.get("insecure")),
                    proxy=self.cfg.get("proxy", ""))
         task.extra = extra or {}
+        task._priority = bool(priority)
         with self._lock:
             self.tasks[task.tid] = task
-            self.order.insert(0, task.tid)
+            if priority:
+                self.order.insert(0, task.tid)
+            else:
+                self.order.insert(0, task.tid)
         task.state = STATE_WAIT
         t = threading.Thread(target=task.run, daemon=True, name=f"xzd-{task.tid}")
         task._run_thread = t
@@ -3198,8 +3240,47 @@ class Manager:
         self.notify()
         return task
 
+    def jump_queue(self, tid: str) -> bool:
+        """把指定任务提到队列最前，并在槽位调度中标记为高优先级。"""
+        with self._lock:
+            if tid not in self.tasks:
+                return False
+            if tid in self.order:
+                self.order.remove(tid)
+            self.order.insert(0, tid)
+            task = self.tasks[tid]
+            task._priority = True
+        # 若任务正在 waiting，让它立即参与下一轮槽位竞争
+        task._wake.set()
+        self.notify()
+        return True
+
     def get(self, tid: str) -> DownloadTask | None:
         return self.tasks.get(tid)
+
+    def fair_target_conns(self, task: DownloadTask) -> int:
+        """速度均衡：单任务时跑满带宽，多任务并行时避免某个任务饿死。
+
+        规则：
+          · 当前活动任务数 ≤ 并发槽位数：每个任务按自己请求的线程数跑
+          · 任务数超过槽位：总线程预算 = 槽位数 × 8，平均分配，
+            但最少保留 4 线程，确保每个任务都有响应
+        """
+        with self._lock:
+            active = [t for t in self.tasks.values()
+                      if t.state in (STATE_DOWNLOADING, STATE_WAIT, STATE_PENDING)]
+            n = len(active)
+        if n <= 0:
+            return task.requested_conns
+        max_slots = max(1, int(self.cfg.get("max_parallel_tasks", 3)))
+        if n <= max_slots:
+            return task.requested_conns
+        total_budget = max_slots * 8
+        fair = max(4, total_budget // n)
+        # 插队任务额外加 4 线程作为奖励
+        if getattr(task, "_priority", False):
+            fair += 4
+        return min(task.requested_conns, fair)
 
     def add_connections(self, task: DownloadTask, k: int = 8) -> bool:
         if not isinstance(task, FileDownload) or task.state != STATE_DOWNLOADING:

@@ -36,7 +36,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.0.7"
+VERSION = "3.0.8"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -101,7 +101,29 @@ import zipfile
 APP_NAME = "{app_name}"
 APP_ID = "{app_id}"
 VERSION = "{version}"
-INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Programs", APP_NAME)
+
+
+def _get_install_dir() -> str:
+    """v3.0.8: 探测安装目录可写性，优先 C:\\Program Files\\XZDM，不可写则降级到 C:\\XZDM。"""
+    candidates = [
+        r"C:\\Program Files\\XZDM",
+        r"C:\\XZDM",
+    ]
+    for cand in candidates:
+        try:
+            os.makedirs(cand, exist_ok=True)
+            test = os.path.join(cand, ".xzd_writable_test")
+            with open(test, "w", encoding="utf-8") as f:
+                f.write("1")
+            os.remove(test)
+            return cand
+        except Exception:
+            continue
+    # 最后兜底：用户目录
+    return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Programs", APP_NAME)
+
+
+INSTALL_DIR = _get_install_dir()
 START_MENU = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\\Windows\\Start Menu\\Programs", APP_NAME)
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall" + "\\\\" + APP_ID
 
@@ -216,11 +238,33 @@ def _shortcut_for(name: str, desktop: bool = False):
     return os.path.join(START_MENU, name + ".lnk")
 
 
+def _get_existing_install_dir() -> str:
+    """从注册表读取旧安装位置（若存在）。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
+            v, _ = winreg.QueryValueEx(k, "InstallLocation")
+            if v and os.path.isdir(v):
+                return v
+    except Exception:
+        pass
+    return ""
+
+
 def _extract():
     zip_bytes = base64.b64decode(PAYLOAD_ZIP_B64)
     tmp_zip = os.path.join(tempfile.gettempdir(), "xzd_payload.zip")
     with open(tmp_zip, "wb") as f:
         f.write(zip_bytes)
+    # v3.0.8: 若本机已有旧版安装在其他目录，先迁移/清理，确保最终安装在 INSTALL_DIR
+    prev = _get_existing_install_dir()
+    if prev and prev != INSTALL_DIR and os.path.isdir(prev):
+        backup = INSTALL_DIR + ".old"
+        _delete_tree(backup)
+        try:
+            os.rename(prev, backup)
+        except Exception:
+            pass
+        _delete_tree(backup)
     if os.path.exists(INSTALL_DIR):
         old = INSTALL_DIR + ".old"
         if os.path.exists(old):
@@ -530,7 +574,12 @@ def main():
         return
     try:
         install()
-        _message_box(f"{APP_NAME} v{VERSION} 安装完成。\n安装位置：{INSTALL_DIR}\n\n浏览器扩展位于安装目录下的 browser-extension 文件夹，请手动加载一次。", "安装完成")
+        _message_box(
+            f"{APP_NAME} v{VERSION} 安装完成。\n"
+            f"安装位置：{INSTALL_DIR}\n\n"
+            f"· 浏览器扩展位于安装目录下的 browser-extension 文件夹，请手动加载一次。\n"
+            f"· 任务记录、配置和历史已保留（位于 %APPDATA%\\{APP_NAME}）。",
+            "安装完成")
     except Exception as e:
         _message_box(f"安装失败：{type(e).__name__}: {e}", "安装失败", 0x10)
         raise

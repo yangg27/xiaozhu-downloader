@@ -216,11 +216,55 @@ class Aria2Bridge:
     def run(self) -> dict:
         if not is_bundled():
             return self._fail("aria2c 组件未打包（缺少 third_party/aria2/）")
-        if self._is_bt(self.url):
-            return self._run_bt()
-        if self._is_hls(self.url):
-            return self._run_hls()
-        return self._run_http()
+        monitor_stop = threading.Event()
+        monitor_thread = threading.Thread(
+            target=self._stall_monitor, args=(monitor_stop,), daemon=True)
+        monitor_thread.start()
+        try:
+            if self._is_bt(self.url):
+                return self._run_bt()
+            if self._is_hls(self.url):
+                return self._run_hls()
+            return self._run_http()
+        finally:
+            monitor_stop.set()
+
+    def _stall_monitor(self, stop_evt: threading.Event):
+        """BT/磁力任务死任务检测：长时间无进展则终止子进程。"""
+        if not self._is_bt(self.url):
+            return
+        stall_limit = 120.0
+        check_interval = 20.0
+        last_progress = -1.0
+        last_bytes = -1
+        last_t = time.time()
+        while not stop_evt.wait(check_interval):
+            if self._proc is None or self._proc.poll() is not None:
+                return
+            task = self.task
+            if task is None:
+                continue
+            progress = getattr(task, "progress", 0.0) or 0.0
+            done_bytes = getattr(task, "done_bytes", 0) or 0
+            changed = (progress != last_progress or done_bytes != last_bytes)
+            if changed:
+                last_progress = progress
+                last_bytes = done_bytes
+                last_t = time.time()
+                continue
+            if time.time() - last_t > stall_limit:
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    pass
+                task.err = ("BT/磁力任务 120 秒无进展，已自动停止。"
+                            "可尝试更换 trackers 后重试。")
+                task.phase = "已停止（无响应）"
+                try:
+                    task.mgr.notify()
+                except Exception:
+                    pass
+                return
 
     @staticmethod
     def _is_hls(url: str) -> bool:
@@ -482,6 +526,8 @@ class Aria2Bridge:
         elapsed = time.time() - t0
 
         # BT 输出可能是目录或多文件；扫 out_dir 内 t0 之后的新增/修改文件
+        if getattr(self.task, "phase", "") == "已停止（无响应）":
+            return self._fail("BT/磁力任务长时间无进展，已自动停止。可更换 trackers 后重试")
         produced = self._collect_bt_outputs(out_dir, t0)
         if not produced:
             return self._fail(f"aria2c (BT) 结束但未产出文件（exit={rc}）")
