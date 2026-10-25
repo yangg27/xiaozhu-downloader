@@ -39,7 +39,7 @@
     <path d="M290 28 H320" class="line"/>
     <path d="M450 28 H480" class="line"/>
   </g>
-  <text class="ts" x="50" y="145">后台行为：Payload base64 解码 → 写安装目录 → HKCU 注册表 → 静默启动主程序</text>
+  <text class="ts" x="50" y="145">后台行为：Payload base64 解码 → 探测 C:\Program Files\XZDM 可写性（不可写降级到 C:\XZDM）→ HKCU 注册表 → 静默启动主程序</text>
 
   <!-- 场景：启动 -->
   <rect x="30" y="190" width="620" height="150" rx="12" class="stage"/>
@@ -87,36 +87,36 @@
 
   <!-- 场景：剪贴板监控 -->
   <rect x="30" y="530" width="620" height="130" rx="12" class="stage"/>
-  <text class="th" x="40" y="555">场景 4：剪贴板监控</text>
+  <text class="th" x="40" y="555">场景 4：剪贴板监控（v3.0.8 起零轮询）</text>
   <g transform="translate(50, 570)">
     <rect x="0" y="0" width="120" height="56" rx="8" class="boxg"/>
     <text class="th" x="60" y="20" text-anchor="middle">复制链接</text>
-    <text class="ts" x="60" y="38" text-anchor="middle">后台线程 1.5s 轮询</text>
+    <text class="ts" x="60" y="38" text-anchor="middle">Windows 原生事件</text>
     <rect x="160" y="0" width="120" height="56" rx="8" class="boxg"/>
     <text class="th" x="220" y="20" text-anchor="middle">主线程读取</text>
-    <text class="ts" x="220" y="38" text-anchor="middle">root.after 调度</text>
+    <text class="ts" x="220" y="38" text-anchor="middle">AddClipboardFormatListener</text>
     <rect x="320" y="0" width="120" height="56" rx="8" class="boxg"/>
-    <text class="th" x="380" y="20" text-anchor="middle">URL 去重</text>
-    <text class="ts" x="380" y="38" text-anchor="middle">对比历史记录</text>
+    <text class="th" x="380" y="20" text-anchor="middle">下载链识别</text>
+    <text class="ts" x="380" y="38" text-anchor="middle">过滤普通网址</text>
     <rect x="480" y="0" width="120" height="56" rx="8" class="boxg"/>
     <text class="th" x="540" y="20" text-anchor="middle">弹新建下载</text>
-    <text class="ts" x="540" y="38" text-anchor="middle">NewDownloadDialog</text>
+    <text class="ts" x="540" y="38" text-anchor="middle">去重 / 取消后再触发</text>
     <path d="M120 28 H160" class="line"/>
     <path d="M280 28 H320" class="line"/>
     <path d="M440 28 H480" class="line"/>
   </g>
-  <text class="ts" x="50" y="645">后台行为：后台线程 sleep → 主线程 clipboard_get → 正则匹配 http(s) → 过滤重复任务</text>
+  <text class="ts" x="50" y="645">后台行为：WM_CLIPBOARDUPDATE 事件 → 主线程 clipboard_get → 仅含文件扩展名/媒体资源才唤起 → 过滤重复任务</text>
 
   <!-- 场景：下载执行 -->
   <rect x="30" y="680" width="620" height="160" rx="12" class="stage"/>
-  <text class="th" x="40" y="705">场景 5：下载执行</text>
+  <text class="th" x="40" y="705">场景 5：下载执行（v3.1.x 动态速度均衡）</text>
   <g transform="translate(50, 720)">
     <rect x="0" y="0" width="110" height="56" rx="8" class="box"/>
     <text class="th" x="55" y="20" text-anchor="middle">任务入队</text>
-    <text class="ts" x="55" y="38" text-anchor="middle">slots 控制并发</text>
+    <text class="ts" x="55" y="38" text-anchor="middle">并发槽最多 3</text>
     <rect x="140" y="0" width="110" height="56" rx="8" class="box"/>
-    <text class="th" x="195" y="20" text-anchor="middle">探测体积</text>
-    <text class="ts" x="195" y="38" text-anchor="middle">Range 0-0</text>
+    <text class="th" x="195" y="20" text-anchor="middle">速度均衡</text>
+    <text class="ts" x="195" y="38" text-anchor="middle">24→19→15</text>
     <rect x="280" y="0" width="110" height="56" rx="8" class="box"/>
     <text class="th" x="335" y="20" text-anchor="middle">分块下载</text>
     <text class="ts" x="335" y="38" text-anchor="middle">1MB 位图</text>
@@ -131,26 +131,28 @@
     <path d="M390 28 H420" class="line"/>
     <path d="M530 28 H560" class="line"/>
   </g>
-  <text class="ts" x="50" y="805">后台行为：分配并发槽 → HTTP HEAD/Range → 多线程拉取 → 异步写盘 → bitmap 落盘 → 清理临时分片</text>
-  <text class="ts" x="50" y="823">限速/429 识别：令牌桶 + 退避；失败达到上限转错误态；aria2c 备用通道一键切换</text>
+  <text class="ts" x="50" y="805">后台行为：最多 3 个槽并行；第 1 任务满速 24 线程，后续按 80% 链式递减；第 4 个起排队；完成后自动递补</text>
+  <text class="ts" x="50" y="823">插队任务默认满速，槽位满时暂停最新唤醒任务；BT/磁力 120 秒无进展自动刷新 tracker 重试；限速/429 令牌桶退避；aria2c 备用通道一键切换</text>
 
   <!-- 场景：错误处理 -->
   <rect x="30" y="860" width="620" height="110" rx="12" class="stage"/>
-  <text class="th" x="40" y="885">场景 6：错误 / 手动重试</text>
+  <text class="th" x="40" y="885">场景 6：错误 / 重试（v3.1.2 起 BT 自动刷新 tracker）</text>
   <g transform="translate(50, 900)">
     <rect x="0" y="0" width="120" height="44" rx="8" class="boxr"/>
     <text class="th" x="60" y="25" text-anchor="middle">任务失败/卡住</text>
-    <rect x="160" y="0" width="140" height="44" rx="8" class="boxr"/>
-    <text class="th" x="230" y="25" text-anchor="middle">右键或工具栏 aria2c 重试</text>
-    <rect x="340" y="0" width="120" height="44" rx="8" class="boxr"/>
-    <text class="th" x="400" y="25" text-anchor="middle">调用 aria2c</text>
-    <rect x="500" y="0" width="120" height="44" rx="8" class="boxr"/>
-    <text class="th" x="560" y="25" text-anchor="middle">恢复下载</text>
+    <rect x="160" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="220" y="25" text-anchor="middle">自动处理</text>
+    <text class="ts" x="220" y="40" text-anchor="middle">BT 刷新 tracker</text>
+    <rect x="320" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="380" y="25" text-anchor="middle">手动重试</text>
+    <text class="ts" x="380" y="40" text-anchor="middle">右键 aria2c</text>
+    <rect x="480" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="540" y="25" text-anchor="middle">恢复下载</text>
     <path d="M120 22 H160" class="line"/>
-    <path d="M300 22 H340" class="line"/>
-    <path d="M460 22 H500" class="line"/>
+    <path d="M280 22 H320" class="line"/>
+    <path d="M440 22 H480" class="line"/>
   </g>
-  <text class="ts" x="50" y="955">后台行为：保存断点 → 启 aria2c / N_m3u8DL-RE 子进程 → 续传文件 → 回写状态</text>
+  <text class="ts" x="50" y="955">后台行为：BT/磁力 metadata 预转失败或 120 秒无进展 → 自动重拉 tracker 并重试一次；HTTP 失败仍支持右键 aria2c / N_m3u8DL-RE 手动重试</text>
 
   <!-- 场景：卸载 -->
   <rect x="30" y="990" width="620" height="140" rx="12" class="stage"/>
