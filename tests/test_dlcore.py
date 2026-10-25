@@ -38,6 +38,11 @@ class FakeTask:
     def set_target_conns(self, n: int):
         self.target = n
 
+    def pause(self):
+        self.state = dlcore.STATE_PAUSED
+        if getattr(self, "_evicted", False):
+            self._evicted = False
+
 
 class TestFairTargetConns(unittest.TestCase):
     def _make_manager(self, max_slots=3, connections=24):
@@ -100,12 +105,30 @@ class TestFairTargetConns(unittest.TestCase):
         self.assertEqual(m.fair_target_conns(t2), 4)
         self.assertEqual(m.fair_target_conns(t3), 4)
 
-    def test_priority_bonus(self):
+    def test_priority_full_speed(self):
         m = self._make_manager()
         t1 = FakeTask(added_at=1.0)
         t2 = FakeTask(added_at=2.0, priority=True)
         m.tasks = {t1.tid: t1, t2.tid: t2}
-        self.assertEqual(m.fair_target_conns(t2), 19 + 2)
+        # 插队任务默认满速，不受 80% 链式递减限制
+        self.assertEqual(m.fair_target_conns(t2), 24)
+
+    def test_evict_youngest(self):
+        m = self._make_manager(max_slots=2)
+        t1 = FakeTask(added_at=1.0)
+        t2 = FakeTask(added_at=2.0)
+        t3 = FakeTask(added_at=3.0, priority=True)
+        t1.state = dlcore.STATE_DOWNLOADING
+        t2.state = dlcore.STATE_DOWNLOADING
+        t1._slot_since = 100.0
+        t2._slot_since = 200.0
+        m.tasks = {t1.tid: t1, t2.tid: t2, t3.tid: t3}
+        m._slot_holders = {t1.tid, t2.tid}
+        m._evict_youngest_for_priority(t3)
+        # 最新唤醒的 t2 应该被暂停并移出槽位
+        self.assertEqual(t2.state, dlcore.STATE_PAUSED)
+        self.assertNotIn(t2.tid, m._slot_holders)
+        self.assertIn(t1.tid, m._slot_holders)
 
 
 class TestHumanSize(unittest.TestCase):

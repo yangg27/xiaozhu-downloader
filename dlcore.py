@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.0"
+ENGINE_VERSION = "3.1.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1001,6 +1001,10 @@ class DownloadTask:
             self.state = STATE_PAUSED
             self.phase = "已暂停"
             self._wake.set()
+            # 被插队挤掉时记录原因，方便用户理解
+            if getattr(self, "_evicted", False):
+                self.phase = "已暂停（被插队任务挤掉）"
+                self._evicted = False
             self.mgr.notify()
 
     def cancel(self, delete_files: bool = False):
@@ -3297,7 +3301,7 @@ class Manager:
         return task
 
     def jump_queue(self, tid: str) -> bool:
-        """把指定任务提到队列最前，并在槽位调度中标记为高优先级。"""
+        """把指定任务提到队列最前，标记为高优先级，并挤掉当前并行任务里最新唤醒的任务。"""
         with self._lock:
             if tid not in self.tasks:
                 return False
@@ -3306,10 +3310,49 @@ class Manager:
             self.order.insert(0, tid)
             task = self.tasks[tid]
             task._priority = True
+
+        # 若并发槽位已满，把最新唤醒（_slot_since 最大）的下载中任务暂停
+        self._evict_youngest_for_priority(task)
+
         # 若任务正在 waiting，让它立即参与下一轮槽位竞争
         task._wake.set()
         self.notify()
         return True
+
+    def _evict_youngest_for_priority(self, priority_task: DownloadTask):
+        """插队任务需要槽位时，暂停当前并行任务中最新唤醒的那个。"""
+        with self._cv:
+            max_slots = max(1, int(self.cfg.get("max_parallel_tasks", 3)))
+            # 清理已结束/已暂停任务占用的槽位
+            for htid in list(self._slot_holders):
+                t = self.tasks.get(htid)
+                if t is None or t.state in (STATE_DONE, STATE_CANCELLED, STATE_ERROR, STATE_PAUSED):
+                    self._slot_holders.discard(htid)
+            # 如果插队任务已经在槽位里，无需挤人
+            if priority_task.tid in self._slot_holders:
+                return
+            # 槽位有空位，也无需挤人
+            if len(self._slot_holders) < max_slots:
+                return
+            # 找出当前在槽位里、正在下载中、且不是插队任务本身的任务，按 _slot_since 倒序（最新的在前面）
+            candidates = []
+            for htid in self._slot_holders:
+                t = self.tasks.get(htid)
+                if t and t.state == STATE_DOWNLOADING and t.tid != priority_task.tid:
+                    candidates.append(t)
+            if not candidates:
+                return
+            candidates.sort(key=lambda t: getattr(t, '_slot_since', 0), reverse=True)
+            victim = candidates[0]
+            victim._evicted = True
+            victim.pause()
+            self._slot_holders.discard(victim.tid)
+            LOG.info("插队任务 %s 挤掉任务 %s，后者已暂停", priority_task.tid, victim.tid)
+        # 释放槽位后触发重平衡
+        try:
+            self._rebalance_targets()
+        except Exception:
+            LOG.debug('忽略异常：_rebalance_targets()')
 
     def get(self, tid: str) -> DownloadTask | None:
         return self.tasks.get(tid)
@@ -3349,9 +3392,9 @@ class Manager:
         for _ in range(idx):
             fair = max(4, int(fair * 0.8))
 
-        # 插队任务额外奖励 2 线程（最多到 requested_conns）
+        # 插队任务默认满速：直接给 requested_conns，不再受 80% 链式递减限制
         if getattr(task, "_priority", False):
-            fair = min(task.requested_conns, fair + 2)
+            return min(task.requested_conns, base)
         return min(task.requested_conns, fair)
 
     def _rebalance_targets(self):
