@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.0.1"
+ENGINE_VERSION = "3.0.2"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -2408,7 +2408,9 @@ class BTDownload(DownloadTask):
         try:
             trackers, src = bt_trackers.get_trackers(
                 prefer_cache=True, allow_fetch=True, timeout=5.0,
-                custom_source=self.mgr.cfg.get("bt_tracker_source", ""))
+                custom_source=self.mgr.cfg.get("bt_tracker_source", ""),
+                probe_alive=bool(self.mgr.cfg.get("bt_tracker_probe_alive", True)),
+                probe_timeout=3.0)
             LOG.debug("BT trackers 来源: %s, 共 %d 条", src, len(trackers))
         except Exception:
             LOG.debug("bt_trackers 拉取失败，仅用 DHT/PEX/LPD")
@@ -3029,6 +3031,8 @@ DEFAULT_CFG = {
     "bt_tracker_source": "https://cf.trackerslist.com/best.txt",
     # v3.0.0: 启动时是否自动更新 trackers（建议开启）
     "bt_trackers_autoupdate": True,
+    # v3.0.2: 启动时是否对 tracker 做端口可达性探测，只保留可用 tracker
+    "bt_tracker_probe_alive": True,
 }
 
 
@@ -3053,7 +3057,9 @@ class Manager:
                 import bt_trackers
                 bt_trackers.update_async(
                     timeout=6.0,
-                    custom_source=self.cfg.get("bt_tracker_source", ""))
+                    custom_source=self.cfg.get("bt_tracker_source", ""),
+                    probe_alive=bool(self.cfg.get("bt_tracker_probe_alive", True)),
+                    probe_timeout=3.0)
             except Exception:
                 pass
 

@@ -136,6 +136,30 @@ def _protocol_rank(t: str) -> int:
     return 4
 
 
+_PRIORITY_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+]
+
+
+def _prioritize_trackers(trackers: list[str]) -> list[str]:
+    """知名 tracker 置顶，同优先级按协议排序。"""
+    seen = set()
+    out = []
+    for t in _PRIORITY_TRACKERS:
+        if t in trackers and t not in seen:
+            seen.add(t)
+            out.append(t)
+    for t in sorted(trackers, key=_protocol_rank):
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def _split_sources(text: str) -> list[str]:
     """把用户输入的源字符串（逗号/空格/换行分隔）拆成 URL 列表。"""
     out = []
@@ -344,36 +368,51 @@ def filter_alive(trackers: list[str], max_workers: int = 32,
 def get_trackers(*, prefer_cache: bool = True,
                  allow_fetch: bool = True,
                  timeout: float = 8.0,
-                 custom_source: str = "") -> tuple[list[str], str]:
+                 custom_source: str = "",
+                 probe_alive: bool = False,
+                 probe_timeout: float = 3.0,
+                 probe_workers: int = 32) -> tuple[list[str], str]:
     """获取 tracker 列表。
     返回 (trackers, source_desc)。
     策略：缓存（新鲜）→ 网络拉取 → 缓存（陈旧）→ 内置兜底
+    如果 probe_alive=True，则对结果进行端口层可达性探测，只保留存活的 tracker。
     """
     cached = load_cached()
     meta = meta_info()
     fresh = bool(cached) and (time.time() - meta.get("updated", 0) < 24 * 3600)
 
+    lst: list[str] = []
+    src = ""
     if prefer_cache and fresh:
-        return cached, f"cache<{meta.get('source','')}>"
-
-    if allow_fetch:
+        lst, src = cached, f"cache<{meta.get('source','')}>"
+    elif allow_fetch:
         lst, src = fetch_trackers(timeout=timeout, custom_source=custom_source)
         if lst:
             save_cache(lst, src)
-            return lst, src
+    elif cached:
+        lst, src = cached, "cache-stale"
+    else:
+        lst, src = list(FALLBACK_TRACKERS), "builtin-fallback"
 
-    if cached:
-        return cached, "cache-stale"
-    return list(FALLBACK_TRACKERS), "builtin-fallback"
+    if probe_alive and lst:
+        alive, _ = filter_alive(lst, max_workers=probe_workers, timeout=probe_timeout)
+        if alive:
+            # 过滤后：知名 tracker 置顶 → UDP 优先 → HTTP/HTTPS/WSS
+            alive = _prioritize_trackers(alive)
+            return alive, f"{src}|alive:{len(alive)}/{len(lst)}"
+    return _prioritize_trackers(lst), src
 
 
 def update_async(callback=None, timeout: float = 8.0,
-                 custom_source: str = "") -> threading.Thread:
+                 custom_source: str = "",
+                 probe_alive: bool = False,
+                 probe_timeout: float = 3.0) -> threading.Thread:
     """启动后台线程更新 trackers。完成后回调 callback(trackers, source)。"""
     def work():
-        lst, src = fetch_trackers(timeout=timeout, custom_source=custom_source)
-        if lst:
-            save_cache(lst, src)
+        lst, src = get_trackers(
+            prefer_cache=False, allow_fetch=True, timeout=timeout,
+            custom_source=custom_source,
+            probe_alive=probe_alive, probe_timeout=probe_timeout)
         if callback:
             try:
                 callback(lst or load_cached() or list(FALLBACK_TRACKERS),

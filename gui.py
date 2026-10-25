@@ -464,6 +464,7 @@ class SettingsDialog(Dialog):
         self.v_engine = tk.StringVar(value=str(c.get("engine", "builtin")))
         self.v_bt_source = tk.StringVar(value=str(c.get("bt_tracker_source", "https://cf.trackerslist.com/best.txt")))
         self.v_bt_autoupdate = tk.BooleanVar(value=bool(c.get("bt_trackers_autoupdate", True)))
+        self.v_bt_probe_alive = tk.BooleanVar(value=bool(c.get("bt_tracker_probe_alive", True)))
         # 系统集成状态
         self.si = None
         self.v_autostart = tk.BooleanVar(value=False)
@@ -561,6 +562,11 @@ class SettingsDialog(Dialog):
                                variable=self.v_bt_autoupdate, bg=BG,
                                fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
         cb_bt.grid(row=15, column=1, sticky="w", pady=(0, 6))
+        # v3.0.2: tracker 测速过滤开关（默认开启）
+        cb_bt_probe = tk.Checkbutton(f, text="BT Tracker 测速过滤（只保留可达 tracker，推荐开启）",
+                                     variable=self.v_bt_probe_alive, bg=BG,
+                                     fg=FG, font=(FONT, 9), activebackground=BG, selectcolor="#fff")
+        cb_bt_probe.grid(row=16, column=1, sticky="w", pady=(0, 6))
 
         # ---- 系统集成 ----
         tk.Frame(f, bg=BORDER, height=1).grid(row=16, column=0, columnspan=3,
@@ -635,6 +641,7 @@ class SettingsDialog(Dialog):
             engine=self.v_engine.get() or "builtin",
             bt_tracker_source=self.v_bt_source.get().strip() or "https://cf.trackerslist.com/best.txt",
             bt_trackers_autoupdate=bool(self.v_bt_autoupdate.get()),
+            bt_tracker_probe_alive=bool(self.v_bt_probe_alive.get()),
         )
         # 剪贴板监听开关立即生效
         if self.app:
@@ -1099,8 +1106,12 @@ class App:
         self._hover_row = None
 
         self.ctx = tk.Menu(self.root, tearoff=0, font=(FONT, 9))
-        self.ctx.add_command(label="继续下载", command=self.resume_selected)
-        self.ctx.add_command(label="暂停", command=self.pause_selected)
+        # v3.0.2：右键菜单置顶状态控制按钮（替代工具栏的“全部继续/全部暂停”）
+        self.ctx.add_command(label="▶ 继续下载", command=self.resume_selected,
+                             font=(FONT, 9, "bold"))
+        self.ctx.add_command(label="⏸ 暂停", command=self.pause_selected,
+                             font=(FONT, 9, "bold"))
+        self.ctx.add_separator()
         self.ctx.add_command(label="增加 8 个线程", command=lambda: self.boost_selected(8))
         self.ctx.add_command(label="增加 16 个线程", command=lambda: self.boost_selected(16))
         self.ctx.add_separator()
@@ -1458,6 +1469,22 @@ class App:
         if row:
             if row not in self.tree.selection():
                 self.tree.selection_set(row)
+            # v3.0.2：根据选中任务状态动态启用/禁用“继续/暂停”
+            sel = self._selected_tids()
+            can_resume = can_pause = False
+            for tid in sel:
+                t = self.mgr.get(tid)
+                if not t:
+                    continue
+                if t.state in (dlcore.STATE_PAUSED, dlcore.STATE_ERROR):
+                    can_resume = True
+                if t.state == dlcore.STATE_DOWNLOADING:
+                    can_pause = True
+            try:
+                self.ctx.entryconfig("▶ 继续下载", state="normal" if can_resume else "disabled")
+                self.ctx.entryconfig("⏸ 暂停", state="normal" if can_pause else "disabled")
+            except Exception:
+                pass
             self.ctx.tk_popup(event.x_root, event.y_root)
 
     # ---------- 悬停高亮（v1.12.0）----------

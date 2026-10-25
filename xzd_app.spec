@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-小助下载管理器 XZDM · PyInstaller 打包配置（v3.0.1）
+小助下载管理器 XZDM · PyInstaller 打包配置（v3.0.2）
 ==========================================
 产物形态：**one-dir**（`小助下载器.exe` + `_internal/`），不是 one-file。
 
