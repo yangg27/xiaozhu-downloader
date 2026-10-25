@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 1280" width="100%" role="img">
+  <title>小助下载器 XZDM 全流程分场景图</title>
+  <desc>展示安装、启动、浏览器接管、剪贴板监控、新建下载、下载执行、完成/错误、卸载各阶段系统后台行为。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .t { font-family: var(--font-sans, "Microsoft YaHei UI", sans-serif); font-size: 13px; fill: #1f2329; }
+      .th { font-family: var(--font-sans, "Microsoft YaHei UI", sans-serif); font-size: 14px; font-weight: 500; fill: #1f2329; }
+      .ts { font-family: var(--font-sans, "Microsoft YaHei UI", sans-serif); font-size: 12px; fill: #5f5e5a; }
+      .box { fill: #f1efe8; stroke: #888780; stroke-width: 0.5; }
+      .boxb { fill: #e6f1fb; stroke: #378add; stroke-width: 0.5; }
+      .boxg { fill: #eaf3de; stroke: #639922; stroke-width: 0.5; }
+      .boxa { fill: #faeeda; stroke: #ba7517; stroke-width: 0.5; }
+      .boxr { fill: #fcebeb; stroke: #e24b4a; stroke-width: 0.5; }
+      .stage { fill: #f1efe8; stroke: #5f5e5a; stroke-width: 0.5; }
+      .line { fill: none; stroke: #888780; stroke-width: 1.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <!-- 场景：安装 -->
+  <rect x="30" y="20" width="620" height="150" rx="12" class="stage"/>
+  <text class="th" x="40" y="45">场景 1：安装</text>
+  <g transform="translate(50, 60)">
+    <rect x="0" y="0" width="130" height="56" rx="8" class="boxb"/>
+    <text class="th" x="65" y="20" text-anchor="middle">双击安装包</text>
+    <text class="ts" x="65" y="38" text-anchor="middle">one-file 自解压</text>
+    <rect x="160" y="0" width="130" height="56" rx="8" class="boxb"/>
+    <text class="th" x="225" y="20" text-anchor="middle">解压到</text>
+    <text class="ts" x="225" y="38" text-anchor="middle">C:\Program Files\XZDM</text>
+    <rect x="320" y="0" width="130" height="56" rx="8" class="boxb"/>
+    <text class="th" x="385" y="20" text-anchor="middle">写注册表</text>
+    <text class="ts" x="385" y="38" text-anchor="middle">自启/协议/卸载项</text>
+    <rect x="480" y="0" width="130" height="56" rx="8" class="boxb"/>
+    <text class="th" x="545" y="20" text-anchor="middle">创建快捷方式</text>
+    <text class="ts" x="545" y="38" text-anchor="middle">开始菜单/桌面</text>
+    <path d="M130 28 H160" class="line"/>
+    <path d="M290 28 H320" class="line"/>
+    <path d="M450 28 H480" class="line"/>
+  </g>
+  <text class="ts" x="50" y="145">后台行为：Payload base64 解码 → 写安装目录 → HKCU 注册表 → 静默启动主程序</text>
+
+  <!-- 场景：启动 -->
+  <rect x="30" y="190" width="620" height="150" rx="12" class="stage"/>
+  <text class="th" x="40" y="215">场景 2：启动</text>
+  <g transform="translate(50, 230)">
+    <rect x="0" y="0" width="120" height="56" rx="8" class="box"/>
+    <text class="th" x="60" y="20" text-anchor="middle">运行小助下载器</text>
+    <text class="ts" x="60" y="38" text-anchor="middle">exe 或 --silent</text>
+    <rect x="160" y="0" width="120" height="56" rx="8" class="box"/>
+    <text class="th" x="220" y="20" text-anchor="middle">单实例探测</text>
+    <text class="ts" x="220" y="38" text-anchor="middle">GetTcpTable / 端口</text>
+    <rect x="320" y="0" width="120" height="56" rx="8" class="box"/>
+    <text class="th" x="380" y="20" text-anchor="middle">加载配置/任务</text>
+    <text class="ts" x="380" y="38" text-anchor="middle">config.json / jobs.json</text>
+    <rect x="480" y="0" width="120" height="56" rx="8" class="box"/>
+    <text class="th" x="540" y="20" text-anchor="middle">启动本地 API</text>
+    <text class="ts" x="540" y="38" text-anchor="middle">127.0.0.1:8763</text>
+    <path d="M120 28 H160" class="line"/>
+    <path d="M280 28 H320" class="line"/>
+    <path d="M440 28 H480" class="line"/>
+  </g>
+  <text class="ts" x="50" y="315">后台行为：handoff 已有实例 → 读配置 → 恢复未完成任务 → 起 localserver + 随机令牌</text>
+
+  <!-- 场景：浏览器接管 -->
+  <rect x="30" y="360" width="620" height="150" rx="12" class="stage"/>
+  <text class="th" x="40" y="385">场景 3：浏览器接管下载</text>
+  <g transform="translate(50, 400)">
+    <rect x="0" y="0" width="120" height="56" rx="8" class="boxa"/>
+    <text class="th" x="60" y="20" text-anchor="middle">点击下载链接</text>
+    <text class="ts" x="60" y="38" text-anchor="middle">扩展拦截</text>
+    <rect x="160" y="0" width="120" height="56" rx="8" class="boxa"/>
+    <text class="th" x="220" y="20" text-anchor="middle">探测本地 API</text>
+    <text class="ts" x="220" y="38" text-anchor="middle">8763~8774</text>
+    <rect x="320" y="0" width="120" height="56" rx="8" class="boxa"/>
+    <text class="th" x="380" y="20" text-anchor="middle">已运行？</text>
+    <text class="ts" x="380" y="38" text-anchor="middle">HTTP /add 转交</text>
+    <rect x="480" y="0" width="120" height="56" rx="8" class="boxa"/>
+    <text class="th" x="540" y="20" text-anchor="middle">未运行</text>
+    <text class="ts" x="540" y="38" text-anchor="middle">xzd://show 唤起</text>
+    <path d="M120 28 H160" class="line"/>
+    <path d="M280 28 H320" class="line"/>
+    <path d="M440 28 H480" class="line"/>
+  </g>
+  <text class="ts" x="50" y="485">后台行为：扩展取消浏览器下载 → 127.0.0.1 /add POST → 新任务进入队列</text>
+
+  <!-- 场景：剪贴板监控 -->
+  <rect x="30" y="530" width="620" height="130" rx="12" class="stage"/>
+  <text class="th" x="40" y="555">场景 4：剪贴板监控</text>
+  <g transform="translate(50, 570)">
+    <rect x="0" y="0" width="120" height="56" rx="8" class="boxg"/>
+    <text class="th" x="60" y="20" text-anchor="middle">复制链接</text>
+    <text class="ts" x="60" y="38" text-anchor="middle">后台线程 1.5s 轮询</text>
+    <rect x="160" y="0" width="120" height="56" rx="8" class="boxg"/>
+    <text class="th" x="220" y="20" text-anchor="middle">主线程读取</text>
+    <text class="ts" x="220" y="38" text-anchor="middle">root.after 调度</text>
+    <rect x="320" y="0" width="120" height="56" rx="8" class="boxg"/>
+    <text class="th" x="380" y="20" text-anchor="middle">URL 去重</text>
+    <text class="ts" x="380" y="38" text-anchor="middle">对比历史记录</text>
+    <rect x="480" y="0" width="120" height="56" rx="8" class="boxg"/>
+    <text class="th" x="540" y="20" text-anchor="middle">弹新建下载</text>
+    <text class="ts" x="540" y="38" text-anchor="middle">NewDownloadDialog</text>
+    <path d="M120 28 H160" class="line"/>
+    <path d="M280 28 H320" class="line"/>
+    <path d="M440 28 H480" class="line"/>
+  </g>
+  <text class="ts" x="50" y="645">后台行为：后台线程 sleep → 主线程 clipboard_get → 正则匹配 http(s) → 过滤重复任务</text>
+
+  <!-- 场景：下载执行 -->
+  <rect x="30" y="680" width="620" height="160" rx="12" class="stage"/>
+  <text class="th" x="40" y="705">场景 5：下载执行</text>
+  <g transform="translate(50, 720)">
+    <rect x="0" y="0" width="110" height="56" rx="8" class="box"/>
+    <text class="th" x="55" y="20" text-anchor="middle">任务入队</text>
+    <text class="ts" x="55" y="38" text-anchor="middle">slots 控制并发</text>
+    <rect x="140" y="0" width="110" height="56" rx="8" class="box"/>
+    <text class="th" x="195" y="20" text-anchor="middle">探测体积</text>
+    <text class="ts" x="195" y="38" text-anchor="middle">Range 0-0</text>
+    <rect x="280" y="0" width="110" height="56" rx="8" class="box"/>
+    <text class="th" x="335" y="20" text-anchor="middle">分块下载</text>
+    <text class="ts" x="335" y="38" text-anchor="middle">1MB 位图</text>
+    <rect x="420" y="0" width="110" height="56" rx="8" class="box"/>
+    <text class="th" x="475" y="20" text-anchor="middle">写盘线程</text>
+    <text class="ts" x="475" y="38" text-anchor="middle">seek+write</text>
+    <rect x="560" y="0" width="80" height="56" rx="8" class="box"/>
+    <text class="th" x="600" y="20" text-anchor="middle">完成</text>
+    <text class="ts" x="600" y="38" text-anchor="middle">合并/重命名</text>
+    <path d="M110 28 H140" class="line"/>
+    <path d="M250 28 H280" class="line"/>
+    <path d="M390 28 H420" class="line"/>
+    <path d="M530 28 H560" class="line"/>
+  </g>
+  <text class="ts" x="50" y="805">后台行为：分配并发槽 → HTTP HEAD/Range → 多线程拉取 → 异步写盘 → bitmap 落盘 → 清理临时分片</text>
+  <text class="ts" x="50" y="823">限速/429 识别：令牌桶 + 退避；失败达到上限转错误态；aria2c 备用通道一键切换</text>
+
+  <!-- 场景：错误处理 -->
+  <rect x="30" y="860" width="620" height="110" rx="12" class="stage"/>
+  <text class="th" x="40" y="885">场景 6：错误 / 手动重试</text>
+  <g transform="translate(50, 900)">
+    <rect x="0" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="60" y="25" text-anchor="middle">任务失败/卡住</text>
+    <rect x="160" y="0" width="140" height="44" rx="8" class="boxr"/>
+    <text class="th" x="230" y="25" text-anchor="middle">右键或工具栏 aria2c 重试</text>
+    <rect x="340" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="400" y="25" text-anchor="middle">调用 aria2c</text>
+    <rect x="500" y="0" width="120" height="44" rx="8" class="boxr"/>
+    <text class="th" x="560" y="25" text-anchor="middle">恢复下载</text>
+    <path d="M120 22 H160" class="line"/>
+    <path d="M300 22 H340" class="line"/>
+    <path d="M460 22 H500" class="line"/>
+  </g>
+  <text class="ts" x="50" y="955">后台行为：保存断点 → 启 aria2c / N_m3u8DL-RE 子进程 → 续传文件 → 回写状态</text>
+
+  <!-- 场景：卸载 -->
+  <rect x="30" y="990" width="620" height="140" rx="12" class="stage"/>
+  <text class="th" x="40" y="1015">场景 7：卸载 / 重装</text>
+  <g transform="translate(50, 1030)">
+    <rect x="0" y="0" width="120" height="56" rx="8" class="boxr"/>
+    <text class="th" x="60" y="20" text-anchor="middle">双击 卸载.exe</text>
+    <text class="ts" x="60" y="38" text-anchor="middle">或控制面板</text>
+    <rect x="160" y="0" width="120" height="56" rx="8" class="boxr"/>
+    <text class="th" x="220" y="20" text-anchor="middle">选择操作</text>
+    <text class="ts" x="220" y="38" text-anchor="middle">卸载 / 重装</text>
+    <rect x="320" y="0" width="120" height="56" rx="8" class="boxr"/>
+    <text class="th" x="380" y="20" text-anchor="middle">清注册表</text>
+    <text class="ts" x="380" y="38" text-anchor="middle">Run/协议/卸载项</text>
+    <rect x="480" y="0" width="120" height="56" rx="8" class="boxr"/>
+    <text class="th" x="540" y="20" text-anchor="middle">删除目录</text>
+    <text class="ts" x="540" y="38" text-anchor="middle">helper 异步删</text>
+    <path d="M120 28 H160" class="line"/>
+    <path d="M280 28 H320" class="line"/>
+    <path d="M440 28 H480" class="line"/>
+  </g>
+  <text class="ts" x="50" y="1105">后台行为：控制面板直接卸载；用户双击可选手动重装 → 复制自身到 TEMP → 父进程退出 → 副本删目录并重新运行安装包</text>
+
+  <!-- 底部提示 -->
+  <text class="ts" x="340" y="1160" text-anchor="middle" fill="#5f5e5a">所有注册表操作均限定在 HKCU，无需管理员权限；用户数据（%APPDATA%\小助下载器）卸载时保留。</text>
+</svg>

@@ -641,11 +641,45 @@ class SettingsDialog(Dialog):
         # 底部按钮栏（固定，不随内容滚动）
         btns = tk.Frame(outer, bg=BG)
         btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=18, pady=(8, 12))
+        tk.Button(btns, text="恢复默认设置", command=self._reset_defaults, font=(FONT, 9),
+                  bg="#fff0f0", fg="#c5221f", relief="flat", padx=12, pady=4,
+                  cursor="hand2").pack(side="left", padx=(0, 12))
         tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
                   fg=FG, relief="flat", padx=18, pady=4, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="保存", command=self._ok, font=(FONT, 10, "bold"), bg=ACCENT,
                   fg="#fff", relief="flat", padx=18, pady=4, activebackground=ACCENT_DARK,
                   cursor="hand2").pack(side="left")
+
+    def _reset_defaults(self):
+        if not messagebox.askyesno("恢复默认设置",
+                                   "确定将所有设置恢复为默认值吗？\n"
+                                   "已下载的文件和任务记录不会被删除。",
+                                   icon="warning"):
+            return
+        # 保留当前安装相关状态不在这里处理；Manager 负责把配置写回
+        defaults = dict(dlcore.DEFAULT_CFG)
+        self.mgr.set_cfg(**defaults)
+        # 刷新界面变量
+        self.v_dir.set(defaults.get("download_dir", ""))
+        self.v_conns.set(int(defaults.get("connections", 24)))
+        self.v_par.set(int(defaults.get("max_parallel_tasks", 3)))
+        self.v_limit.set(int(defaults.get("speed_limit", 0)) // 1024)
+        self.v_proxy.set(defaults.get("proxy", ""))
+        self.v_ua.set(defaults.get("user_agent", dlcore.DEFAULT_UA))
+        self.v_tmp.set(bool(defaults.get("delete_tmp_after_done", True)))
+        self.v_insecure.set(bool(defaults.get("insecure", False)))
+        self.v_port.set(int(defaults.get("port", 8763)))
+        self.v_clipboard.set(bool(defaults.get("clipboard_watch", True)))
+        self.v_engine.set(defaults.get("engine", "builtin"))
+        self.v_bt_source.set(defaults.get("bt_tracker_source",
+                                          "https://cf.trackerslist.com/best.txt"))
+        self.v_bt_autoupdate.set(bool(defaults.get("bt_trackers_autoupdate", True)))
+        self.v_bt_probe_alive.set(bool(defaults.get("bt_tracker_probe_alive", True)))
+        # 剪贴板监听立即生效
+        if self.app:
+            self.app._clip_enabled = bool(self.v_clipboard.get())
+        # 系统集成保持现状（用户可能只是想重置下载设置）
+        messagebox.showinfo("恢复默认设置", "已恢复默认设置，点击“保存”后生效。")
 
     def _refresh_si_label(self):
         if not self.si:
@@ -715,6 +749,209 @@ class SettingsDialog(Dialog):
         self.destroy()
         if msgs and self.app:
             self.app.lbl_status.config(text=" · ".join(msgs))
+
+
+class HelpDialog(Dialog):
+    """帮助页面：版本、功能、扩展安装、设置含义、默认设置截图。"""
+
+    HELP_TEXT = """小助下载器 XZDM 使用帮助
+
+【当前版本】v{version}
+
+【软件功能】
+· 多线程满速下载（内置引擎 / aria2c 备用）
+· 浏览器下载接管（Chrome / Edge 通用扩展）
+· 网页媒体嗅探（m3u8 / mp4 / mp3 / flv…）
+· BT / 磁力链下载（aria2c + 自动 tracker 更新）
+· 剪贴板监听（复制链接自动弹新建下载）
+· 断点续传与任务恢复
+· 开机自启 + 后台静默运行
+· HLS 视频下载与合并
+· 音视频合并（FFmpeg）
+
+【浏览器扩展安装】
+1. 打开 Chrome：chrome://extensions 或 Edge：edge://extensions
+2. 打开右上角「开发者模式」
+3. 点「加载已解压的扩展程序」
+4. 选择安装目录下的 browser-extension 文件夹
+5. 建议把扩展图标固定到工具栏
+
+【主要功能使用】
+· 新建下载：点工具栏「+ 新建下载」粘贴链接；或直接 Ctrl+V
+· 动态加速：右键下载任务 →「增加 8/16 个线程」
+· aria2c 重试：任务失败或卡住 → 工具栏「⚡ aria2c 重试」
+· 分析网页：点「分析网页」粘贴网页地址，列出媒体资源
+· 托盘：双击显示窗口 / 右键暂停继续退出
+
+【设置项含义】
+· 默认保存目录：新任务默认落盘位置
+· 默认线程数：每个任务连接数（1-32，默认 24）
+· 同时下载任务数：超过后任务排队
+· 全局限速：0 = 不限速，单位 KB/s
+· 代理服务器：形如 http://127.0.0.1:7890
+· User-Agent：默认 Chrome UA
+· 本地接口端口：与浏览器扩展通信，默认 8763
+· 任务完成后自动清理临时分片：删除 .xzd 临时目录
+· 忽略 HTTPS 证书错误：仅特殊环境使用
+· 剪贴板监听：复制链接自动弹新建下载
+· 默认下载引擎：builtin 内置 / aria2c 备用
+· BT Trackers 源：启动时自动拉取 tracker 列表
+· 启动时自动更新 BT trackers：建议开启
+· BT Tracker 测速过滤：只保留可达 tracker
+· 开机自启：后台静默运行
+· 注册 xzd:// 协议：浏览器点击下载自动唤起
+"""
+
+    def __init__(self, master, mgr):
+        super().__init__(master, "帮助", 620, 520, resizable=True, scrollable=True)
+        self.mgr = mgr
+        self._build()
+
+    def _build(self):
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="both", expand=True)
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        self._canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(outer, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        vsb.grid(row=0, column=1, sticky="ns", pady=(8, 0))
+
+        f = tk.Frame(self._canvas, bg=BG, padx=18, pady=14)
+        self._canvas_window = self._canvas.create_window((0, 0), window=f, anchor="nw",
+                                                         width=self._dlg_w - 48)
+        f.bind("<Configure>", lambda e: self._canvas.configure(
+            scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<Configure>", lambda e: self._on_dlg_configure())
+
+        def _on_mousewheel(event):
+            try:
+                self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        self.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # 标题 + 版本
+        tk.Label(f, text="小助下载器 XZDM", bg=BG, fg=FG,
+                 font=(FONT, 13, "bold")).pack(anchor="w", pady=(0, 4))
+        tk.Label(f, text=f"当前版本：v{dlcore.ENGINE_VERSION}", bg=BG, fg=ACCENT,
+                 font=(FONT, 9)).pack(anchor="w", pady=(0, 12))
+
+        # 功能列表
+        tk.Label(f, text="软件功能", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, 8))
+        features = [
+            "多线程满速下载（内置引擎 / aria2c 备用）",
+            "浏览器下载接管（Chrome / Edge 通用扩展）",
+            "网页媒体嗅探（m3u8 / mp4 / mp3 / flv…）",
+            "BT / 磁力链下载（aria2c + 自动 tracker 更新）",
+            "剪贴板监听（复制链接自动弹新建下载）",
+            "断点续传与任务恢复",
+            "开机自启 + 后台静默运行",
+            "HLS 视频下载与合并",
+            "音视频合并（FFmpeg）",
+        ]
+        for ft in features:
+            tk.Label(f, text="· " + ft, bg=BG, fg=FG, font=(FONT, 9)).pack(anchor="w", pady=(2, 2))
+
+        # 浏览器扩展安装
+        tk.Label(f, text="浏览器扩展安装", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
+        steps = [
+            "打开 Chrome：chrome://extensions 或 Edge：edge://extensions",
+            "打开右上角「开发者模式」",
+            "点「加载已解压的扩展程序」",
+            f"选择安装目录下的 browser-extension 文件夹（{dlcore.app_root() if not dlcore.is_frozen() else '安装目录'}\\browser-extension）",
+            "建议把扩展图标固定到工具栏",
+        ]
+        for i, st in enumerate(steps, 1):
+            tk.Label(f, text=f"{i}. {st}", bg=BG, fg=FG, font=(FONT, 9),
+                     wraplength=520, justify="left").pack(anchor="w", pady=(2, 2))
+
+        # 功能使用说明
+        tk.Label(f, text="主要功能使用", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
+        usage = [
+            "新建下载：点工具栏「+ 新建下载」粘贴链接；或直接 Ctrl+V",
+            "动态加速：右键下载任务 →「增加 8/16 个线程」",
+            "aria2c 重试：任务失败或卡住 → 工具栏「⚡ aria2c 重试」",
+            "分析网页：点「分析网页」粘贴网页地址，列出媒体资源",
+            "托盘：双击显示窗口 / 右键暂停继续退出",
+        ]
+        for u in usage:
+            tk.Label(f, text="· " + u, bg=BG, fg=FG, font=(FONT, 9),
+                     wraplength=520, justify="left").pack(anchor="w", pady=(2, 2))
+
+        # 设置项含义
+        tk.Label(f, text="设置项含义", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
+        settings = [
+            ("默认保存目录", "新任务默认落盘位置"),
+            ("默认线程数", "每个任务连接数（1-32，默认 24）"),
+            ("同时下载任务数", "超过后任务排队"),
+            ("全局限速", "0 = 不限速，单位 KB/s"),
+            ("代理服务器", "形如 http://127.0.0.1:7890"),
+            ("User-Agent", "默认 Chrome UA"),
+            ("本地接口端口", "与浏览器扩展通信，默认 8763"),
+            ("任务完成后自动清理临时分片", "删除 .xzd 临时目录"),
+            ("忽略 HTTPS 证书错误", "仅特殊环境使用"),
+            ("剪贴板监听", "复制链接自动弹新建下载"),
+            ("默认下载引擎", "builtin 内置 / aria2c 备用"),
+            ("BT Trackers 源", "启动时自动拉取 tracker 列表"),
+            ("启动时自动更新 BT trackers", "建议开启"),
+            ("BT Tracker 测速过滤", "只保留可达 tracker"),
+            ("开机自启", "后台静默运行"),
+            ("注册 xzd:// 协议", "浏览器点击下载自动唤起"),
+        ]
+        for name, desc in settings:
+            tk.Label(f, text=f"· {name}：{desc}", bg=BG, fg=FG, font=(FONT, 9),
+                     wraplength=520, justify="left").pack(anchor="w", pady=(2, 2))
+
+        # 默认设置截图占位
+        tk.Label(f, text="默认设置截图", bg=BG, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(16, 8))
+        self._img_lbl = tk.Label(f, text="未找到默认设置截图", bg="#eef1f6", fg=FG_DIM,
+                                 font=(FONT, 9), width=60, height=12, relief="flat")
+        self._img_lbl.pack(anchor="w", pady=(0, 8))
+        self._load_default_settings_image()
+
+        # 关闭按钮
+        btns = tk.Frame(outer, bg=BG)
+        btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=18, pady=(8, 12))
+        tk.Button(btns, text="关闭", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
+                  fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left")
+
+    def _load_default_settings_image(self):
+        """加载安装目录下的 default-settings.png，若不存在则显示提示。"""
+        candidates = [
+            os.path.join(dlcore.app_root(), "default-settings.png"),
+            os.path.join(dlcore.app_root(), "browser-extension", "default-settings.png"),
+        ]
+        path = ""
+        for c in candidates:
+            if os.path.exists(c):
+                path = c
+                break
+        if not path:
+            self._img_lbl.config(text="未找到默认设置截图（default-settings.png）\n"
+                                     "可在设置页面按 Ctrl+Alt+P 保存截图到安装目录。")
+            return
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path)
+            # 等比缩放到宽度 520
+            w, h = img.size
+            max_w = 520
+            if w > max_w:
+                ratio = max_w / w
+                img = img.resize((max_w, int(h * ratio)), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self._img_lbl.config(image=photo, text="", width=0, height=0, bg=BG)
+            self._img_lbl.image = photo  # 保持引用
+        except Exception:
+            self._img_lbl.config(text="默认设置截图加载失败")
 
 
 class WebScanDialog(Dialog):
@@ -1094,8 +1331,12 @@ class App:
         btn(row1, "⚡ aria2c 重试", self.retry_selected_with_aria2, compact=True)
         right = tk.Frame(row1, bg=CARD)
         right.pack(side="right")
+        btn(right, "帮助", self._open_help, compact=True)
         btn(right, "设置", self._open_settings_panel, compact=True)
         btn(right, "打开目录", lambda: open_in_explorer(self.mgr.cfg.get("download_dir", "")), compact=True)
+
+    def _open_help(self):
+        HelpDialog(self.root, self.mgr)
 
         # 主体：两个标签页
         self.nb = ttk.Notebook(self.root)

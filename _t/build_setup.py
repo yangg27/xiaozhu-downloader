@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+r"""
 build_setup.py · 小助下载管理器 XZDM 安装包构建脚本
 ============================================
 把 dist_app/小助下载器 打包成单个可执行安装包：
-  dist_setup/小助下载器_v3.0.2_安装包.exe
+  dist_setup/小助下载器_v3.0.5_安装包.exe
 
 安装器行为：
-  1. 自解压到 %LOCALAPPDATA%\Programs\小助下载器
+  1. 自解压到 C:\Program Files\XZDM
   2. 创建开始菜单快捷方式 + 桌面快捷方式
   3. 注册开机自启、xzd:// 协议、卸载项
   4. 立即后台静默启动
@@ -16,7 +16,8 @@ build_setup.py · 小助下载管理器 XZDM 安装包构建脚本
 卸载器行为：
   · 清理注册表（自启、协议、卸载项）
   · 删除快捷方式
-  · 删除安装目录（用脱离式子进程解决"删不掉自己"问题）
+  · 删除安装目录（用脱离式子进程解决“删不掉自己”问题）
+  · 支持卸载/重装选择
 """
 
 from __future__ import annotations
@@ -391,20 +392,141 @@ def _is_already_running():
 
 def _message_box(msg: str, title: str = APP_NAME, style: int = 0x40):
     try:
-        ctypes.windll.user32.MessageBoxW(None, msg, title, style)
+        return ctypes.windll.user32.MessageBoxW(None, msg, title, style)
     except Exception:
         print(msg)
+        return 1
+
+
+def _is_control_panel_uninstall():
+    """判断是否由控制面板/系统卸载入口调用（参数里带 /S 或 /u）。"""
+    if len(sys.argv) <= 1:
+        return False
+    a = sys.argv[1].lower().lstrip("-/")
+    return a in ("u", "uninstall") or a.startswith("uninstall")
+
+
+def _choose_uninstall_or_repair():
+    """弹出选择：卸载 / 重装。返回 'uninstall' | 'repair' | 'cancel'。"""
+    # MB_YESNOCANCEL + 问号图标；Yes=重装，No=卸载，Cancel=取消
+    res = _message_box(
+        "您正在运行小助下载器卸载程序。\n\n"
+        "· 点击「是」→ 保留用户数据并重新安装（修复/重装）\n"
+        "· 点击「否」→ 卸载软件（保留下载的文件和设置）\n"
+        "· 点击「取消」→ 什么都不做",
+        f"卸载 / 重装 {APP_NAME}",
+        0x23)  # MB_YESNOCANCEL | MB_ICONQUESTION
+    # IDYES=6, IDNO=7, IDCANCEL=2, IDOK=1
+    if res == 6:
+        return "repair"
+    if res == 7:
+        return "uninstall"
+    return "cancel"
+
+
+def _repair():
+    """重装：先清理注册表/快捷方式，再用当前卸载器里的 payload 重新安装。"""
+    # 1. 把自身复制到临时目录作为安装源（当前 exe 在安装目录里，一会要删）
+    installer_src = sys.executable
+    installer_tmp = os.path.join(tempfile.gettempdir(), "xzd_repair_installer.exe")
+    try:
+        shutil.copy2(installer_src, installer_tmp)
+    except Exception as e:
+        _message_box(f"复制重装文件失败：{e}", "重装失败", 0x10)
+        return
+    # 2. 清理旧注册表与快捷方式（保留程序目录由 helper 删）
+    try:
+        _reg_delete_tree(winreg.HKEY_CURRENT_USER, r"Software\\Classes\\xzd")
+        _reg_delete_tree(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, APP_ID)
+        except FileNotFoundError:
+            pass
+        for p in (_shortcut_for(APP_NAME), _shortcut_for("卸载 " + APP_NAME), _shortcut_for(APP_NAME, desktop=True)):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # 3. 杀掉运行中的主程序，删除旧目录
+    try:
+        subprocess.run(["taskkill", "/f", "/im", "小助下载器.exe"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    time.sleep(0.5)
+    helper = _shell_copy_self_to_temp()
+    pid = os.getpid()
+    cmd = f'"{helper}" __DO_REPAIR__ "{INSTALL_DIR}" "{pid}" "{installer_tmp}"'
+    _log(f"launching repair helper: {cmd}")
+    subprocess.Popen(cmd, shell=True,
+                     creationflags=0x00000008,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _log("repair helper launched, exiting")
+    os._exit(0)
+
+
+def _do_repair_from_helper():
+    """helper：等父进程死后删除旧目录，再运行临时安装包重新安装。"""
+    target_dir = sys.argv[2] if len(sys.argv) > 2 else INSTALL_DIR
+    parent_pid = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 0
+    installer_tmp = sys.argv[4] if len(sys.argv) > 4 else ""
+    _log(f"repair helper start target={target_dir} parent={parent_pid} installer={installer_tmp}")
+    if parent_pid:
+        _wait_pid_dead(parent_pid, timeout=10.0)
+    time.sleep(2.0)
+    _delete_tree(target_dir)
+    _log(f"old dir removed exists={os.path.exists(target_dir)}")
+    if installer_tmp and os.path.exists(installer_tmp):
+        try:
+            subprocess.Popen([installer_tmp],
+                             creationflags=0x00000008,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _log("installer launched from temp")
+        except Exception as e:
+            _log(f"launch installer failed: {e}")
+    # 删除自己（副本）
+    me = sys.executable
+    vbs = os.path.join(tempfile.gettempdir(), "xzd_delself.vbs")
+    try:
+        with open(vbs, "w", encoding="utf-16") as f:
+            f.write(f"Set fso=CreateObject(\"Scripting.FileSystemObject\")\n")
+            f.write(f"WScript.Sleep 2000\n")
+            f.write(f"fso.DeleteFile \"{me}\"\n")
+            f.write(f"fso.DeleteFile \"{installer_tmp}\"\n")
+            f.write(f"fso.DeleteFile \"{vbs}\"\n")
+        subprocess.Popen(["cscript", "//nologo", vbs],
+                         creationflags=0x00000008,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    os._exit(0)
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "__DO_UNINSTALL__":
         _do_uninstall_from_helper()
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "__DO_REPAIR__":
+        _do_repair_from_helper()
+        return
     if len(sys.argv) > 1 and sys.argv[1].lower().lstrip("-/") in ("u", "uninstall"):
         uninstall()
         return
     if _is_already_running():
         _message_box("安装器已经在运行。")
+        return
+    # 控制面板调用直接卸载；用户主动双击卸载器则给选择
+    if os.path.basename(sys.executable).lower() in ("卸载.exe", "uninstall.exe") and not _is_control_panel_uninstall():
+        choice = _choose_uninstall_or_repair()
+        if choice == "repair":
+            _repair()
+            return
+        if choice == "uninstall":
+            uninstall()
+            return
         return
     try:
         install()
