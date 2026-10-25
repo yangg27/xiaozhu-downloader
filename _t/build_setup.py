@@ -35,7 +35,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -138,15 +138,39 @@ def _wait_pid_dead(pid: int, timeout: float = 5.0):
 
 def _delete_tree(path: str):
     if os.path.isdir(path):
-        for i in range(3):
+        for i in range(5):
             try:
+                # 先改文件属性，再尝试 shutil.rmtree
+                for root, dirs, files in os.walk(path):
+                    for d in dirs:
+                        dp = os.path.join(root, d)
+                        try:
+                            os.chmod(dp, 0o777)
+                        except Exception:
+                            pass
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        try:
+                            os.chmod(fp, 0o777)
+                        except Exception:
+                            pass
                 shutil.rmtree(path)
                 return True
             except Exception:
-                time.sleep(0.3)
+                time.sleep(0.5)
+        # 兜底：用 robocopy 空目录覆盖法删除顽固目录
+        try:
+            empty = tempfile.mkdtemp(prefix="xzd_del_")
+            subprocess.run(["robocopy", empty, path, "/MIR", "/NJH", "/NJS", "/NDL", "/NC", "/NS", "/NP"], capture_output=True, timeout=30)
+            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(empty, ignore_errors=True)
+            return not os.path.exists(path)
+        except Exception:
+            return False
     elif os.path.isfile(path):
-        for i in range(3):
+        for i in range(5):
             try:
+                os.chmod(path, 0o777)
                 os.remove(path)
                 return True
             except Exception:
@@ -273,12 +297,20 @@ def _launch(exe: str):
 def install():
     _extract()
     exe = os.path.join(INSTALL_DIR, "小助下载器.exe")
+    # 把安装包自身复制为卸载器，确保控制面板/快捷方式都能正常卸载
+    uninstaller_src = sys.executable
+    uninstaller_dst = os.path.join(INSTALL_DIR, "卸载.exe")
+    try:
+        shutil.copy2(uninstaller_src, uninstaller_dst)
+    except Exception:
+        pass
     _register(exe)
     _create_shortcuts(exe)
     _launch(exe)
 
 
 def uninstall():
+    _log(f"uninstall start argv={sys.argv} exe={sys.executable}")
     # 清理注册表
     _reg_delete_tree(winreg.HKEY_CURRENT_USER, r"Software\\Classes\\xzd")
     _reg_delete_tree(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
@@ -287,13 +319,19 @@ def uninstall():
             winreg.DeleteValue(k, APP_ID)
     except FileNotFoundError:
         pass
-    # 清理快捷方式
+    # 清理快捷方式及空目录
     for p in (_shortcut_for(APP_NAME), _shortcut_for("卸载 " + APP_NAME), _shortcut_for(APP_NAME, desktop=True)):
         if os.path.exists(p):
             try:
                 os.remove(p)
             except Exception:
                 pass
+    # 删除开始菜单程序组空目录
+    try:
+        if os.path.isdir(START_MENU) and not os.listdir(START_MENU):
+            os.rmdir(START_MENU)
+    except Exception:
+        pass
     # 杀掉运行中的主程序
     try:
         subprocess.run(["taskkill", "/f", "/im", "小助下载器.exe"], capture_output=True, timeout=5)
@@ -304,20 +342,34 @@ def uninstall():
     helper = _shell_copy_self_to_temp()
     pid = os.getpid()
     cmd = f'"{helper}" __DO_UNINSTALL__ "{INSTALL_DIR}" "{pid}"'
+    _log(f"launching helper: {cmd}")
     subprocess.Popen(cmd, shell=True,
                      creationflags=0x00000008,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _log("helper launched, exiting")
     os._exit(0)
+
+
+def _log(msg: str):
+    try:
+        p = os.path.join(tempfile.gettempdir(), "xzd_uninstall.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 
 def _do_uninstall_from_helper():
     target_dir = sys.argv[2] if len(sys.argv) > 2 else INSTALL_DIR
     parent_pid = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 0
+    _log(f"helper start target={target_dir} parent={parent_pid}")
     if parent_pid:
-        _wait_pid_dead(parent_pid, timeout=8.0)
+        dead = _wait_pid_dead(parent_pid, timeout=10.0)
+        _log(f"parent dead={dead}")
     # 再等一下确保文件锁释放
-    time.sleep(1.0)
-    _delete_tree(target_dir)
+    time.sleep(2.0)
+    ok = _delete_tree(target_dir)
+    _log(f"delete_tree ok={ok} exists={os.path.exists(target_dir)}")
     # 删除自己（副本）
     me = sys.executable
     vbs = os.path.join(tempfile.gettempdir(), "xzd_delself.vbs")
@@ -348,7 +400,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "__DO_UNINSTALL__":
         _do_uninstall_from_helper()
         return
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ("/u", "-u", "uninstall"):
+    if len(sys.argv) > 1 and sys.argv[1].lower().lstrip("-/") in ("u", "uninstall"):
         uninstall()
         return
     if _is_already_running():
