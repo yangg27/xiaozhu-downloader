@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v2.6.3
+小助下载器 · 图形界面  gui.py   v3.0.8
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -707,7 +707,9 @@ class SettingsDialog(Dialog):
 
         # 底部按钮栏（固定，不随内容滚动）
         btns = tk.Frame(outer, bg=BG)
-        btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=18, pady=(8, 12))
+        btns.grid(row=1, column=0, columnspan=2, sticky="we", padx=18, pady=(8, 12))
+        self._reset_hint = tk.Label(btns, text="", bg=BG, fg=OK, font=(FONT, 9))
+        self._reset_hint.pack(side="left", padx=(0, 12))
         tk.Button(btns, text="恢复默认设置", command=self._reset_defaults, font=(FONT, 9),
                   bg="#fff0f0", fg="#c5221f", relief="flat", padx=12, pady=4,
                   cursor="hand2").pack(side="left", padx=(0, 12))
@@ -747,6 +749,10 @@ class SettingsDialog(Dialog):
             self.app._clip_enabled = bool(self.v_clipboard.get())
         # 系统集成保持现状（用户可能只是想重置下载设置）
         messagebox.showinfo("恢复默认设置", "已恢复默认设置，点击“保存”后生效。")
+        try:
+            self._reset_hint.config(text="已恢复默认设置，点击“保存”后生效。", fg=OK)
+        except Exception:
+            pass
 
     def _save_screenshot(self):
         """把当前设置窗口截图保存为安装目录下的 default-settings.png。"""

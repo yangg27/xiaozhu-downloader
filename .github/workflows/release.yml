@@ -35,6 +35,15 @@ jobs:
           python -c "import tkinter; print('tkinter OK:', tkinter.Tcl().eval('info patchlevel'))"
           python -c "import PIL; print('PIL OK:', PIL.__version__)"
 
+      - name: Verify version alignment
+        run: python _t/check_version.py
+
+      - name: Run unit tests
+        run: python -m unittest tests.test_dlcore -v
+
+      - name: Run e2e regression
+        run: python tests/e2e_regression.py
+
       - name: Build main app
         id: build_app
         env:
@@ -128,7 +137,7 @@ jobs:
           files: |
             ${{ steps.find_installer.outputs.installer }}
             dist_setup/xiaozhu-downloader-${{ github.ref_name }}-portable.zip
-          name: 小助下载器 ${{ github.ref_name }} — aria2c 备用极速通道
+          name: 小助下载器 ${{ github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -157,7 +166,8 @@ jobs:
           ## 说明
           - 安装包：one-file 单文件，内含全部依赖（Python 运行时 + aria2c + ffmpeg）
           - 便携版：one-dir 结构，解压后运行 `小助下载器.exe`，启动速度更快
-          - 浏览器扩展位于安装目录下的 browser-extension 文件夹，请手动加载一次
+          - 浏览器扩展位于安装目录下的 browser-extension 文件夹，解压 .crx/.zip 后手动加载即可
+          - 任务记录、配置和历史默认保留在 `%APPDATA%\小助下载器`，卸载/重装不会丢失
 
           详见 [README.md](./README.md) 与 [使用说明.md](./使用说明.md)。
           "@
