@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v2.6.0
+小助下载器 · 核心引擎  dlcore.py   v3.1.2
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.1"
+ENGINE_VERSION = "3.1.2"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -2468,6 +2468,20 @@ class BTDownload(DownloadTask):
         except Exception:
             LOG.debug("bt_trackers 拉取失败，仅用 DHT/PEX/LPD")
 
+        # v3.1.2: 供 metadata 预转 / aria2c 死任务时重新拉取最新 tracker 的回调
+        def refetch_trackers():
+            try:
+                new, src = bt_trackers.get_trackers(
+                    prefer_cache=False, allow_fetch=True, timeout=8.0,
+                    custom_source=self.mgr.cfg.get("bt_tracker_source", ""),
+                    probe_alive=bool(self.mgr.cfg.get("bt_tracker_probe_alive", True)),
+                    probe_timeout=3.0)
+                LOG.info("BT 重新拉取 trackers: %s, %d 条", src, len(new))
+                return new, src
+            except Exception as exc:
+                LOG.debug("BT 重新拉取 trackers 失败: %s", exc)
+                return None
+
         # 自动规范化输入：磁力链→转种子、HTTP种子→下载、本地种子→解析
         cache_dir = os.path.join(self.mgr.data_dir, "bt_cache")
         os.makedirs(cache_dir, exist_ok=True)
@@ -2478,7 +2492,8 @@ class BTDownload(DownloadTask):
                 self.url, cache_dir=cache_dir, trackers=trackers,
                 headers=dict(self.http.extra),
                 proxy=self.http._proxy,
-                magnet_timeout=300.0)
+                magnet_timeout=300.0,
+                on_refetch_trackers=refetch_trackers)
         except Exception as exc:
             raise RuntimeError(f"BT 输入处理失败：{exc}")
 
@@ -2517,7 +2532,8 @@ class BTDownload(DownloadTask):
             proxy="",  # BT 流量不走代理
             connections=16,
             trackers=trackers,
-            task=self)
+            task=self,
+            on_refetch_trackers=refetch_trackers)
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "aria2c BT 下载失败"))
         # 附加记录：种子文件列表

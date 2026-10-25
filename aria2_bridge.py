@@ -188,7 +188,8 @@ class Aria2Bridge:
     def __init__(self, url: str, out_dir: str, filename: str = "",
                  referer: str = "", cookie: str = "", headers: dict | None = None,
                  user_agent: str = "", proxy: str = "", connections: int = 16,
-                 task=None):
+                 task=None, trackers: list[str] | None = None,
+                 on_refetch_trackers=None):
         self.url = url
         self.out_dir = _normalize_win_path(out_dir)
         self.filename = filename or _guess_filename(url)
@@ -199,8 +200,11 @@ class Aria2Bridge:
         self.proxy = proxy or ""
         self.connections = max(1, min(32, int(connections)))
         self.task = task
+        self.trackers = list(trackers) if trackers else []
+        self.on_refetch_trackers = on_refetch_trackers
         self._proc: subprocess.Popen | None = None
         self._stop = False
+        self._retried_with_fresh_trackers = False
 
     # ---- 控制 ----
     def stop(self):
@@ -222,7 +226,19 @@ class Aria2Bridge:
         monitor_thread.start()
         try:
             if self._is_bt(self.url):
-                return self._run_bt()
+                # v3.1.2: 若 _stall_monitor 触发 tracker 刷新，需要循环重试一次
+                result = self._run_bt()
+                if (callable(self.on_refetch_trackers)
+                        and self._retried_with_fresh_trackers
+                        and self.task
+                        and "已换 trackers 重试" in str(getattr(self.task, "phase", ""))):
+                    try:
+                        if self._proc and self._proc.poll() is None:
+                            self._proc.wait(timeout=10)
+                    except Exception:
+                        pass
+                    result = self._run_bt()
+                return result
             if self._is_hls(self.url):
                 return self._run_hls()
             return self._run_http()
@@ -230,7 +246,7 @@ class Aria2Bridge:
             monitor_stop.set()
 
     def _stall_monitor(self, stop_evt: threading.Event):
-        """BT/磁力任务死任务检测：长时间无进展则终止子进程。"""
+        """BT/磁力任务死任务检测：长时间无进展则终止子进程；支持自动重拉 tracker 重试一次。"""
         if not self._is_bt(self.url):
             return
         stall_limit = 120.0
@@ -253,17 +269,38 @@ class Aria2Bridge:
                 last_t = time.time()
                 continue
             if time.time() - last_t > stall_limit:
+                # v3.1.2: 首次停滞 → 换一批最新 tracker 重试一次；第二次停滞 → 真正停止
+                if (callable(self.on_refetch_trackers)
+                        and not self._retried_with_fresh_trackers):
+                    self._retried_with_fresh_trackers = True
+                    refetched = self.on_refetch_trackers()
+                    if refetched:
+                        new_trackers, src = refetched
+                        self.trackers = list(new_trackers)
+                        if task:
+                            task.phase = f"已换 trackers 重试（{src}）"
+                            task.err = ""
+                            try:
+                                task.mgr.notify()
+                            except Exception:
+                                pass
+                        try:
+                            self._proc.terminate()
+                        except Exception:
+                            pass
+                        return
                 try:
                     self._proc.terminate()
                 except Exception:
                     pass
-                task.err = ("BT/磁力任务 120 秒无进展，已自动停止。"
-                            "可尝试更换 trackers 后重试。")
-                task.phase = "已停止（无响应）"
-                try:
-                    task.mgr.notify()
-                except Exception:
-                    pass
+                if task:
+                    task.err = ("BT/磁力任务 120 秒无进展，已自动停止。"
+                                "可尝试更换 trackers 后重试。")
+                    task.phase = "已停止（无响应）"
+                    try:
+                        task.mgr.notify()
+                    except Exception:
+                        pass
                 return
 
     @staticmethod
@@ -526,8 +563,12 @@ class Aria2Bridge:
         elapsed = time.time() - t0
 
         # BT 输出可能是目录或多文件；扫 out_dir 内 t0 之后的新增/修改文件
-        if getattr(self.task, "phase", "") == "已停止（无响应）":
+        phase = getattr(self.task, "phase", "")
+        if phase == "已停止（无响应）":
             return self._fail("BT/磁力任务长时间无进展，已自动停止。可更换 trackers 后重试")
+        # v3.1.2: _stall_monitor 已触发 tracker 刷新并终止旧进程时，返回特殊标记由 run() 外层重试
+        if self._retried_with_fresh_trackers and "已换 trackers 重试" in str(phase):
+            return self._fail("__RETRY_WITH_FRESH_TRACKERS__")
         produced = self._collect_bt_outputs(out_dir, t0)
         if not produced:
             return self._fail(f"aria2c (BT) 结束但未产出文件（exit={rc}）")
@@ -685,12 +726,13 @@ def run_aria2(url: str, out_dir: str, filename: str = "", *,
               referer: str = "", cookie: str = "", headers: dict | None = None,
               user_agent: str = "", proxy: str = "", connections: int = 16,
               trackers: list | None = None,
-              task=None) -> dict:
+              task=None,
+              on_refetch_trackers=None) -> dict:
     """一键调用 aria2c 备用通道；不依赖外部安装。trackers 用于 BT/磁力。"""
     bridge = Aria2Bridge(url, out_dir, filename=filename,
                          referer=referer, cookie=cookie, headers=headers,
                          user_agent=user_agent, proxy=proxy,
-                         connections=connections, task=task)
-    if trackers:
-        bridge.trackers = list(trackers)
+                         connections=connections, task=task,
+                         trackers=trackers,
+                         on_refetch_trackers=on_refetch_trackers)
     return bridge.run()

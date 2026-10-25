@@ -1,5 +1,5 @@
 """
-小助下载管理器 · BT/磁力辅助模块（v3.0.1）
+小助下载管理器 · BT/磁力辅助模块（v3.1.2）
 
 职责：
 1. 统一规范化 BT 输入（magnet / .torrent 本地路径 / .torrent HTTP URL）
@@ -115,77 +115,94 @@ def _unique_path(path: str) -> str:
 def magnet_to_torrent(magnet: str, out_dir: str | None = None,
                       trackers: list[str] | None = None,
                       timeout: float = 300.0,
-                      proxy: str | None = None) -> str | None:
+                      proxy: str | None = None,
+                      on_refetch_trackers=None) -> str | None:
     """
     用 aria2c --bt-metadata-only=true 把磁力链转成 .torrent 种子文件。
     成功返回种子路径；失败返回 None。
     这比直接下载更稳，因为拿到 metadata 后可用 bt-load-saved-metadata 续传。
+
+    v3.1.2: 支持预转失败时通过 on_refetch_trackers 回调重新拉取 tracker 再试一次。
     """
     out_dir = out_dir or tempfile.gettempdir()
     os.makedirs(out_dir, exist_ok=True)
-    tmp_dir = tempfile.mkdtemp(prefix="xzdm_magnet_", dir=out_dir)
 
-    cmd = [
-        _aria2c_exe(),
-        "--no-conf",
-        "--continue=false",
-        "--bt-metadata-only=true",
-        "--enable-dht=true",
-        "--enable-dht6=true",
-        "--enable-peer-exchange=true",
-        "--bt-enable-lpd=true",
-        f"--dht-file-path={os.path.join(out_dir, 'aria2_dht.dat')}",
-        f"--dht-file-path6={os.path.join(out_dir, 'aria2_dht6.dat')}",
-        "--bt-save-metadata=true",
-        "--seed-time=0",
-        "--bt-stop-timeout=120",
-        "--bt-max-peers=128",
-        "--summary-interval=5",
-        "--file-allocation=none",
-        f"--dir={tmp_dir}",
-        "--console-log-level=warn",
-    ]
-    if trackers:
-        cmd.append("--bt-tracker=" + ",".join(trackers[:50]))
-    if proxy:
-        cmd.append(f"--all-proxy={proxy}")
-    cmd.append(magnet)
+    def _try_once(current_trackers: list[str] | None, phase_label: str) -> str | None:
+        tmp_dir = tempfile.mkdtemp(prefix="xzdm_magnet_", dir=out_dir)
+        cmd = [
+            _aria2c_exe(),
+            "--no-conf",
+            "--continue=false",
+            "--bt-metadata-only=true",
+            "--enable-dht=true",
+            "--enable-dht6=true",
+            "--enable-peer-exchange=true",
+            "--bt-enable-lpd=true",
+            f"--dht-file-path={os.path.join(out_dir, 'aria2_dht.dat')}",
+            f"--dht-file-path6={os.path.join(out_dir, 'aria2_dht6.dat')}",
+            "--bt-save-metadata=true",
+            "--seed-time=0",
+            "--bt-stop-timeout=120",
+            "--bt-max-peers=128",
+            "--summary-interval=5",
+            "--file-allocation=none",
+            f"--dir={tmp_dir}",
+            "--console-log-level=warn",
+        ]
+        if current_trackers:
+            cmd.append("--bt-tracker=" + ",".join(current_trackers[:50]))
+        if proxy:
+            cmd.append(f"--all-proxy={proxy}")
+        cmd.append(magnet)
 
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            text=True, encoding="utf-8", errors="replace")
-        t0 = time.time()
-        while proc.poll() is None:
-            if time.time() - t0 > timeout:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    proc.kill()
-                break
-            time.sleep(0.5)
-        rc = proc.poll()
-        # aria2c metadata-only 成功后会保存 .torrent 文件到 tmp_dir
-        torrents = []
-        for root, _, files in os.walk(tmp_dir):
-            for fn in files:
-                if fn.lower().endswith(".torrent"):
-                    torrents.append(os.path.join(root, fn))
-        if torrents:
-            # 按修改时间取最新的
-            torrents.sort(key=os.path.getmtime, reverse=True)
-            final = os.path.join(out_dir, os.path.basename(torrents[0]))
-            final = _unique_path(final)
-            shutil.move(torrents[0], final)
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                text=True, encoding="utf-8", errors="replace")
+            t0 = time.time()
+            while proc.poll() is None:
+                if time.time() - t0 > timeout:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        proc.kill()
+                    break
+                time.sleep(0.5)
+            # aria2c metadata-only 成功后会保存 .torrent 文件到 tmp_dir
+            torrents = []
+            for root, _, files in os.walk(tmp_dir):
+                for fn in files:
+                    if fn.lower().endswith(".torrent"):
+                        torrents.append(os.path.join(root, fn))
+            if torrents:
+                torrents.sort(key=os.path.getmtime, reverse=True)
+                final = os.path.join(out_dir, os.path.basename(torrents[0]))
+                final = _unique_path(final)
+                shutil.move(torrents[0], final)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return final
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            return final
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None
-    except Exception:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None
+            return None
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return None
+
+    # 第一次尝试
+    result = _try_once(trackers, "metadata 预抓取")
+    if result:
+        return result
+
+    # 失败且提供了重新拉取回调 → 换一批 tracker 再试一次
+    if callable(on_refetch_trackers):
+        refetched = on_refetch_trackers()
+        if refetched:
+            new_trackers, src = refetched
+            LOG = __import__("logging", fromlist=[""]).getLogger(__name__)
+            LOG.info("metadata 预转失败，已重新拉取 trackers（来源: %s, %d 条）重试", src, len(new_trackers))
+            return _try_once(new_trackers, "metadata 重试")
+    return None
 
 
 def normalize_bt_input(url_or_path: str,
@@ -193,7 +210,8 @@ def normalize_bt_input(url_or_path: str,
                        trackers: list[str] | None = None,
                        headers: dict | None = None,
                        proxy: str | None = None,
-                       magnet_timeout: float = 300.0) -> dict[str, Any]:
+                       magnet_timeout: float = 300.0,
+                       on_refetch_trackers=None) -> dict[str, Any]:
     """
     统一规范化 BT 输入，返回字典：
     {
@@ -238,7 +256,8 @@ def normalize_bt_input(url_or_path: str,
     # 3. 磁力链 -> 尝试 metadata-only 转种子
     if is_magnet(raw):
         converted = magnet_to_torrent(raw, out_dir=cache_dir, trackers=trackers,
-                                      timeout=magnet_timeout, proxy=proxy)
+                                      timeout=magnet_timeout, proxy=proxy,
+                                      on_refetch_trackers=on_refetch_trackers)
         if converted and os.path.exists(converted):
             info = _parse_torrent(converted)
             return {
