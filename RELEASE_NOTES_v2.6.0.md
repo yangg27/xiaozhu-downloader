@@ -2,8 +2,8 @@
 
 ## 下载
 
-- **Windows 安装包**：`xiaozhu-downloader-v2.6.0-setup.exe`（约 32 MB）
-- 由 GitHub Actions 自动构建并上传至 Release Assets。
+- **Windows 安装包**：`xiaozhu-downloader-v2.6.0-setup.exe`（约 35.4 MB）
+- 由 GitHub Actions 自动构建并上传至 Release Assets；SHA256 见 Release 页面。
 
 ## 说明
 

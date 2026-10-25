@@ -3,7 +3,6 @@
 """
 build_app.py · 冻结小助下载器主程序
 =====================================
-文档中提到的构建脚本，补齐缺失的 `_t/build_app.py`。
 用 PyInstaller 把 gui.py 打成 one-dir 形态，输出到 dist_app/。
 
 注意：构建主程序**必须**使用带 tkinter 的系统 Python，否则运行报 No module _tkinter。
@@ -23,7 +22,6 @@ SPEC = os.path.join(ROOT, "xzd_app.spec")
 # PyInstaller 默认把 one-dir 产物放在 dist/<name>/，我们复制到 dist_app/ 保持文档一致
 DIST_SRC = os.path.join(ROOT, "dist", "小助下载器")
 DIST = os.path.join(ROOT, "dist_app", "小助下载器")
-BUILD = os.path.join(ROOT, "build")
 
 
 def run():
@@ -48,15 +46,6 @@ def run():
         py = shutil.which("python") or sys.executable
 
     print(f"[build_app] 使用 Python: {py}")
-    print(f"[build_app] 清理旧产物: {DIST_SRC} / {DIST}")
-    # 用改名代替 rmtree，避免 safe-delete 守卫拦截大目录删除
-    for old in (DIST_SRC, DIST):
-        if os.path.exists(old):
-            bak = old + ".old"
-            if os.path.exists(bak):
-                shutil.rmtree(bak, ignore_errors=True)
-            os.rename(old, bak)
-    shutil.rmtree(BUILD, ignore_errors=True)
 
     cmd = [py, "-m", "PyInstaller", "--clean", "--noconfirm", SPEC]
     print(f"[build_app] 执行: {' '.join(cmd)}")
@@ -70,6 +59,8 @@ def run():
         sys.exit(3)
 
     # 把产物挪到 dist_app/ 下（与文档一致）
+    if os.path.exists(DIST):
+        shutil.rmtree(DIST, ignore_errors=True)
     os.makedirs(os.path.dirname(DIST), exist_ok=True)
     shutil.move(DIST_SRC, DIST)
 
@@ -85,13 +76,11 @@ def run():
                 shutil.copy2(src, dst)
             print(f"[build_app] 已复制: {name}")
 
-    # 顺手清理 PyInstaller 默认 dist/ 空目录与旧备份
+    # 顺手清理 PyInstaller 默认 dist/ 空目录
     try:
         os.rmdir(os.path.dirname(DIST_SRC))
     except OSError:
         pass
-    for old in (DIST_SRC + ".old", DIST + ".old"):
-        shutil.rmtree(old, ignore_errors=True)
 
     print(f"[build_app] 完成: {app_dir}")
 
