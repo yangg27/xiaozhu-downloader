@@ -101,17 +101,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
+        continue-on-error: true
         run: |
           $tag = "${{ github.ref_name }}"
           $keep = @("xiaozhu-downloader-$tag-setup.exe", "xiaozhu-downloader-$tag-portable.zip")
-          $assets = gh release view $tag --json assets -q '.assets[].name' 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            foreach ($asset in $assets) {
-              if ($asset -notin $keep) {
-                Write-Output "Deleting stale asset: $asset"
-                gh release delete-asset $tag $asset --yes
+          try {
+            $json = gh release view $tag --json assets 2>$null
+            if ($LASTEXITCODE -eq 0 -and $json) {
+              $assets = ($json | ConvertFrom-Json).assets | ForEach-Object { $_.name }
+              foreach ($asset in $assets) {
+                if ($asset -notin $keep) {
+                  Write-Output "Deleting stale asset: $asset"
+                  gh release delete-asset $tag $asset --yes
+                }
               }
+            } else {
+              Write-Output "No existing release for $tag, skip cleanup"
             }
+          } catch {
+            Write-Output "Cleanup failed (non-fatal): $_"
           }
 
       - name: Create Release
