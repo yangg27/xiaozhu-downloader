@@ -58,8 +58,10 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 exe = EXE(
-    pyz, a.scripts, [],
-    exclude_binaries=True,
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
     name="{setup_name}",
     debug=False,
     bootloader_ignore_signals=False,
@@ -73,7 +75,6 @@ exe = EXE(
     entitlements_file=None,
     icon=os.path.join(ROOT, "tray.ico") if os.path.exists(os.path.join(ROOT, "tray.ico")) else None,
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="{setup_name}")
 '''
 
 SETUP_PY_HEADER = r'''#!/usr/bin/env python3
@@ -426,16 +427,16 @@ def run():
     with open(SPEC_FILE, "w", encoding="utf-8") as f:
         f.write(INSTALLER_TEMPLATE.format(setup_name=setup_name))
 
-    # 4) PyInstaller 打安装包（one-dir，因为 one-file 含 base64 载荷会很大，但 one-dir 安装器更稳）
-    print("[build_setup] 开始 PyInstaller 构建...")
+    # 4) PyInstaller 打安装包（one-file 单文件，用户双击即用，无需 _internal 目录）
+    print("[build_setup] 开始 PyInstaller 构建（one-file 模式）...")
     cmd = [py, "-m", "PyInstaller", "--clean", "--noconfirm", "-y", SPEC_FILE]
     rc = subprocess.run(cmd, cwd=OUT_DIR).returncode
     if rc != 0:
         print("[build_setup] PyInstaller 构建失败", file=sys.stderr)
         sys.exit(rc)
 
-    # PyInstaller one-dir 产物在 dist/<setup_name>/；把它里面内容搬到 OUT_DIR 下
-    dist_out = os.path.join(OUT_DIR, "dist", setup_name)
+    # one-file 模式产物在 dist/<setup_name>.exe（单文件）
+    dist_exe = os.path.join(OUT_DIR, "dist", setup_name + ".exe")
     final_dir = os.path.join(OUT_DIR, setup_name)
     if os.path.isdir(final_dir):
         # 改名让路
@@ -443,10 +444,11 @@ def run():
         if os.path.exists(bak):
             shutil.rmtree(bak, ignore_errors=True)
         os.rename(final_dir, bak)
-    if os.path.isdir(dist_out):
-        shutil.move(dist_out, final_dir)
+    os.makedirs(final_dir, exist_ok=True)
+    if os.path.isfile(dist_exe):
+        shutil.copy2(dist_exe, os.path.join(final_dir, setup_name + ".exe"))
     else:
-        print(f"[build_setup] 找不到 PyInstaller 输出：{dist_out}", file=sys.stderr)
+        print(f"[build_setup] 找不到 PyInstaller 输出：{dist_exe}", file=sys.stderr)
         sys.exit(3)
 
     # 5) 清理中间产物（保留 setup.py 供校验）

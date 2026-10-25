@@ -21,7 +21,7 @@ jobs:
         id: setup-python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.13'
 
       - name: Install dependencies
         run: |
@@ -63,6 +63,13 @@ jobs:
           $exe = Get-ChildItem -Path "dist_setup" -Recurse -Filter "*.exe" | Select-Object -First 1
           if (-not $exe) {
             Write-Error "Installer exe not found"
+            exit 1
+          }
+          # one-file 模式：验证 exe 不依赖 _internal 目录
+          $exeDir = $exe.Directory.FullName
+          $internalDir = Join-Path $exeDir "_internal"
+          if (Test-Path $internalDir) {
+            Write-Error "one-file build should NOT have _internal directory"
             exit 1
           }
           $tag = "${{ github.ref_name }}"
