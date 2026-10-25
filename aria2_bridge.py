@@ -379,27 +379,41 @@ class Aria2Bridge:
         if not trackers and isinstance(self.headers, dict):
             trackers = self.headers.pop("_trackers", None) or []
 
+        # DHT 路由表持久化目录：优先用任务级 data_dir，否则用输出目录
+        data_dir = (getattr(self, "data_dir", None)
+                    or (self.task and getattr(self.task, "mgr", None)
+                        and getattr(self.task.mgr, "data_dir", None))
+                    or out_dir)
+        os.makedirs(data_dir, exist_ok=True)
+
         cmd = [
             aria2c_exe(),
             "--no-conf",
             "--continue=true",
             "--auto-file-renaming=true",  # BT 文件已存在时自动加 (1) 后缀
             "--allow-overwrite=true",     # 配合 continue=true：已有 .aria2 控制文件时续传
+            # ---- DHT / PEX / LPD：最大化发现 peer ----
             "--enable-dht=true",
             "--enable-dht6=true",
             "--enable-peer-exchange=true",
-            "--bt-enable-lpd=true",  # LSD（本地服务发现）等价开关
+            "--bt-enable-lpd=true",
+            f"--dht-file-path={os.path.join(data_dir, 'aria2_dht.dat')}",
+            f"--dht-file-path6={os.path.join(data_dir, 'aria2_dht6.dat')}",
+            # ---- BT 连接策略 ----
             "--bt-require-crypto=false",
             "--bt-save-metadata=true",
             "--bt-load-saved-metadata=true",
             "--bt-metadata-only=false",
             "--seed-time=0",
+            "--bt-max-peers=128",              # 默认 55，适当提高连接数
+            "--bt-request-peer-speed-limit=50K",  # 低于 50KB/s 的 peer 不再请求
+            "--bt-stop-timeout=600",           # 10 分钟无数据则停止（磁力 metadata 阶段更省资源）
+            "--bt-min-crypto-level=plain",     # 兼容更多老旧客户端
             "--summary-interval=1",
             "--disk-cache=64M",
             "--file-allocation=none",
             "--follow-torrent=true",
             "--follow-metalink=true",
-            "--bt-max-peers=0",
             f"--dir={out_dir}",
             "--show-console-readout=true",
             "--console-log-level=notice",
@@ -431,11 +445,11 @@ class Aria2Bridge:
             for t in udp_tr:
                 if t not in tr:
                     tr.append(t)
-                if len(tr) >= 14: break
+                if len(tr) >= 40: break
             for t in http_tr:
                 if t not in tr:
                     tr.append(t)
-                if len(tr) >= 20: break
+                if len(tr) >= 50: break
             if tr:
                 cmd.append("--bt-tracker=" + ",".join(tr))
         if self.user_agent:

@@ -61,6 +61,8 @@ a = Analysis(
         "tray", "localserver", "sysintegration", "dlcore", "aria2_bridge",
         # v3.0.0: BT 支持
         "bt_trackers",
+        # v3.1.0: 种子文件解析
+        "torrent_parser",
         "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk",
         "http.server", "http.client", "urllib.request", "urllib.parse",
         "urllib.error", "urllib.response", "ssl", "_ssl", "socket", "select",

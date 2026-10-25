@@ -2401,7 +2401,9 @@ class BTDownload(DownloadTask):
         trackers = []
         try:
             import bt_trackers
-            trackers, src = bt_trackers.get_trackers(prefer_cache=True, allow_fetch=True, timeout=5.0)
+            trackers, src = bt_trackers.get_trackers(
+                prefer_cache=True, allow_fetch=True, timeout=5.0,
+                custom_source=self.mgr.cfg.get("bt_tracker_source", ""))
             LOG.debug("BT trackers 来源: %s, 共 %d 条", src, len(trackers))
         except Exception:
             LOG.debug("bt_trackers 拉取失败，仅用 DHT")
@@ -3006,7 +3008,9 @@ class Manager:
         if self.cfg.get("bt_trackers_autoupdate", True):
             try:
                 import bt_trackers
-                bt_trackers.update_async(timeout=6.0)
+                bt_trackers.update_async(
+                    timeout=6.0,
+                    custom_source=self.cfg.get("bt_tracker_source", ""))
             except Exception:
                 pass
 

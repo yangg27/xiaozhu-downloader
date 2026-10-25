@@ -283,8 +283,10 @@ class MergeAVDialog(Dialog):
 
 
 class NewDownloadDialog(Dialog):
+    """v3.1.0 统一新建下载入口：支持 HTTP/HTTPS、磁力链 magnet:、本地/远程 .torrent 种子。"""
+
     def __init__(self, master, mgr, preset: dict | None = None):
-        super().__init__(master, "新建下载", 560, 520)
+        super().__init__(master, "新建下载", 560, 560)
         self.mgr = mgr
         preset = preset or {}
         self.v_url = tk.StringVar(value=preset.get("url", ""))
@@ -309,13 +311,16 @@ class NewDownloadDialog(Dialog):
         f = tk.Frame(self, bg=BG, padx=18, pady=16)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
-        tk.Label(f, text="下载链接（支持多行，每行一个）", bg=BG, fg=FG,
+        tk.Label(f, text="下载链接 / 磁力链 / 种子文件", bg=BG, fg=FG,
                  font=(FONT, 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        tk.Label(f, text="支持每行一个 HTTP/HTTPS 链接、magnet:?xt=... 磁力链，或点击下方按钮选择 .torrent 种子文件",
+                 bg=BG, fg=FG_DIM, font=(FONT, 8)).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
         # 多行 URL 输入
         url_frame = tk.Frame(f, bg=BG)
-        url_frame.grid(row=1, column=1, sticky="we", pady=(0, 8))
-        self.t_url = tk.Text(url_frame, height=6, font=(FONT, 9), bg="#fff", fg=FG,
+        url_frame.grid(row=2, column=1, sticky="we", pady=(0, 8))
+        self.t_url = tk.Text(url_frame, height=5, font=(FONT, 9), bg="#fff", fg=FG,
                              relief="solid", bd=1, wrap="none")
         self.t_url.pack(side="left", fill="both", expand=True)
         sb = tk.Scrollbar(url_frame, orient="vertical", command=self.t_url.yview)
@@ -323,9 +328,22 @@ class NewDownloadDialog(Dialog):
         self.t_url.configure(yscrollcommand=sb.set)
         self.t_url.insert("1.0", self.v_url.get())
         tk.Label(f, text="下载地址", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
-            row=1, column=0, sticky="nw", pady=(0, 8))
+            row=2, column=0, sticky="nw", pady=(0, 8))
+
+        # 种子文件选择
+        torrent_row = tk.Frame(f, bg=BG)
+        torrent_row.grid(row=3, column=1, sticky="we", pady=(0, 12))
+        self.v_torrent = tk.StringVar(value="")
+        tk.Entry(torrent_row, textvariable=self.v_torrent, font=(FONT, 9), bg="#fff", fg=FG,
+                 relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT, state="readonly").pack(side="left", fill="x", expand=True, ipady=4)
+        tk.Button(torrent_row, text="选择种子文件", command=self._pick_torrent, font=(FONT, 9),
+                  bg="#eef1f6", fg=FG, relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(6, 0))
+        tk.Label(f, text="种子文件", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
+            row=3, column=0, sticky="w", pady=(0, 12))
+
         fr = tk.Frame(f, bg=BG)
-        fr.grid(row=2, column=1, sticky="we", pady=(0, 8))
+        fr.grid(row=4, column=1, sticky="we", pady=(0, 8))
         tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
                  relief="solid", bd=1, highlightthickness=1,
                  highlightbackground=BORDER, highlightcolor=ACCENT).pack(
@@ -333,13 +351,12 @@ class NewDownloadDialog(Dialog):
         tk.Button(fr, text="浏览", command=self._pick_dir, font=(FONT, 9), bg="#eef1f6",
                   fg=FG, relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(6, 0))
         tk.Label(f, text="保存目录", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
-            row=2, column=0, sticky="w", pady=(0, 8))
-        self._row(f, "文件名称", self.v_name, 3)
-        tk.Label(f, text="线程数", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=4, column=0, sticky="w", pady=(0, 8))
+        self._row(f, "文件名称", self.v_name, 5)
+        tk.Label(f, text="线程数", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
+            row=6, column=0, sticky="w", pady=(0, 8))
         conn_row = tk.Frame(f, bg=BG)
-        conn_row.grid(row=4, column=1, sticky="we", pady=(0, 8))
-        # 输入框（不用 _row，避免 grid/pack 混用）
+        conn_row.grid(row=6, column=1, sticky="we", pady=(0, 8))
         e_conn = tk.Entry(conn_row, textvariable=self.v_conns, font=(FONT, 9),
                           bg="#fff", fg=FG, relief="solid", bd=1,
                           highlightthickness=1, highlightbackground=BORDER,
@@ -347,13 +364,13 @@ class NewDownloadDialog(Dialog):
         e_conn.pack(side="left", ipady=4)
         tk.Label(conn_row, text="线程（1-32，越多越快，部分服务器限制）", bg=BG,
                  fg=FG_DIM, font=(FONT, 8)).pack(side="left", padx=(8, 0))
-        self._row(f, "Referer", self.v_ref, 5)
-        self._row(f, "Cookie", self.v_cookie, 6)
+        self._row(f, "Referer", self.v_ref, 7)
+        self._row(f, "Cookie", self.v_cookie, 8)
         tip = tk.Label(f, text="提示：视频/音频站点通常需要 Referer；不填则自动带上来源页",
                        bg=BG, fg=FG_DIM, font=(FONT, 8))
-        tip.grid(row=7, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        tip.grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 10))
         btns = tk.Frame(f, bg=BG)
-        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=10, column=0, columnspan=2, sticky="e", pady=(12, 0))
         tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
                   fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="开始下载", command=self._ok, font=(FONT, 10, "bold"),
@@ -368,24 +385,58 @@ class NewDownloadDialog(Dialog):
         if d:
             self.v_dir.set(os.path.normpath(d))
 
+    def _pick_torrent(self):
+        p = filedialog.askopenfilename(
+            title="选择 BT 种子文件",
+            filetypes=[("BT 种子", "*.torrent"), ("所有文件", "*.*")],
+            initialdir=os.path.expanduser("~"))
+        if not p:
+            return
+        p = os.path.normpath(p)
+        self.v_torrent.set(p)
+        self.t_url.delete("1.0", "end")
+        self.t_url.insert("1.0", p)
+        # v3.1.0：解析种子并显示摘要
+        try:
+            import torrent_parser
+            info = torrent_parser.parse_torrent(p)
+            files = info.get("files", [])
+            total = info.get("total_length", 0)
+            name = info.get("name") or os.path.basename(p)
+            if files:
+                summary = f"种子：{name} | 大小：{dlcore.human_size(total)} | 文件数：{len(files)}"
+            else:
+                summary = f"种子：{name} | 大小：{dlcore.human_size(total)}"
+            messagebox.showinfo("种子信息", summary, parent=self)
+        except Exception as e:
+            messagebox.showwarning("种子解析失败", f"无法解析该种子文件：{e}", parent=self)
+
     def _ok(self):
         raw = self.t_url.get("1.0", "end").strip()
-        if not raw:
-            messagebox.showwarning("提示", "请填写下载地址", parent=self)
+        torrent_path = self.v_torrent.get().strip()
+        if not raw and not torrent_path:
+            messagebox.showwarning("提示", "请填写下载地址或选择种子文件", parent=self)
             return
         urls = [u.strip() for u in raw.splitlines() if u.strip()]
+        if torrent_path and os.path.exists(torrent_path):
+            urls.insert(0, torrent_path)
         if not urls:
-            messagebox.showwarning("提示", "请填写下载地址", parent=self)
+            messagebox.showwarning("提示", "请填写下载地址或选择种子文件", parent=self)
             return
-        # 自动补协议
         fixed = []
         for u in urls:
-            if not u.lower().startswith(("http://", "https://", "ftp://")):
-                u = "http://" + u
-            fixed.append(u)
+            if os.path.exists(u):
+                # 本地种子文件保持原样
+                fixed.append(u)
+            elif u.startswith("magnet:"):
+                fixed.append(u)
+            elif u.lower().startswith(("http://", "https://", "ftp://")):
+                fixed.append(u)
+            else:
+                fixed.append("http://" + u)
         self.result = {
-            "urls": fixed,  # 多链接
-            "url": fixed[0],  # 兼容单链接
+            "urls": fixed,
+            "url": fixed[0],
             "out_dir": self.v_dir.get().strip(), "filename": self.v_name.get().strip(),
             "conns": max(1, min(32, int(self.v_conns.get() or 24))),
             "referer": self.v_ref.get().strip(), "cookie": self.v_cookie.get().strip(),
@@ -982,22 +1033,15 @@ class App:
             b.pack(side="left", padx=(0, 6))
             return b
 
-        # v3.0.0：两行紧凑布局。第一行核心输入，第二行批量操作与工具
+        # v3.1.0：单行紧凑工具栏。新建下载统一入口支持 HTTP/磁力/种子
         row1 = tk.Frame(inner, bg=CARD)
         row1.pack(fill="x")
         btn(row1, "+ 新建下载", self.new_download, primary=True)
-        btn(row1, "+ 新建 BT/磁力", self.new_bt_download)
-        btn(row1, "粘贴链接", self._paste_url, compact=True)
         btn(row1, "分析网页", lambda: WebScanDialog(self.root, self), compact=True)
         btn(row1, "音视频合并", lambda: MergeAVDialog(self.root, self), compact=True)
-
-        row2 = tk.Frame(inner, bg=CARD)
-        row2.pack(fill="x", pady=(6, 0))
-        btn(row2, "全部继续", lambda: (self.mgr.resume_all(), self.refresh_now()), compact=True)
-        btn(row2, "全部暂停", lambda: (self.mgr.pause_all(), self.refresh_now()), compact=True)
-        btn(row2, "清除已完成", self.clear_done, compact=True)
-        btn(row2, "⚡ aria2c 重试", self.retry_selected_with_aria2, compact=True)
-        right = tk.Frame(row2, bg=CARD)
+        btn(row1, "清除已完成", self.clear_done, compact=True)
+        btn(row1, "⚡ aria2c 重试", self.retry_selected_with_aria2, compact=True)
+        right = tk.Frame(row1, bg=CARD)
         right.pack(side="right")
         btn(right, "设置", self._open_settings_panel, compact=True)
         btn(right, "打开目录", lambda: open_in_explorer(self.mgr.cfg.get("download_dir", "")), compact=True)
@@ -1280,53 +1324,36 @@ class App:
 
     # ---------- 动作 ----------
     def new_download(self, preset=None):
+        """v3.1.0：统一新建下载入口（HTTP/磁力/种子）。"""
         d = NewDownloadDialog(self.root, self.mgr, preset)
-        self.root.wait_window(d)
-        if d.result:
-            r = d.result
-            urls = r.get("urls", [r["url"]])
-            for u in urls:
-                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
-                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
-                                  kind="auto")
-            self.refresh_now()
-
-    def new_bt_download(self):
-        """v3.0.0：新建 BT/磁力任务。支持 magnet: URI 和本地 .torrent 文件。"""
-        # 优先尝试剪贴板里的 magnet
-        preset_url = ""
-        try:
-            clip = self.root.clipboard_get().strip()
-            if clip.startswith("magnet:") or clip.endswith(".torrent"):
-                preset_url = clip
-        except Exception:
-            pass
-        d = NewDownloadDialog(self.root, self.mgr, {"url": preset_url})
         self.root.wait_window(d)
         if not d.result:
             return
         r = d.result
-        url = r["url"].strip()
-        if not (url.startswith("magnet:") or url.endswith(".torrent") or
-                url.startswith("http") or os.path.exists(url)):
-            messagebox.showwarning("格式不对", "请粘贴 magnet:?xt=... 磁力链，或选择 .torrent 种子文件")
-            return
-        # 本地 .torrent 文件直接传路径；http(s) 种子文件 aria2c 也支持
-        self.mgr.add_task(url, out_dir=r["out_dir"], filename=r["filename"],
-                          conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
-                          kind="bt")
+        urls = r.get("urls", [r["url"]])
+        for u in urls:
+            kind = dlcore.kind_of_url(u)
+            # 磁力和本地种子直接走 bt；http .torrent 先交给 aria2c 自动处理
+            if kind == "bt":
+                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
+                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
+                                  kind="bt")
+            else:
+                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
+                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
+                                  kind="auto")
         self.refresh_now()
 
     def _paste_url(self):
+        """v3.1.0：粘贴链接 → 打开统一新建对话框并自动填入。"""
         try:
             txt = self.root.clipboard_get().strip()
         except Exception:
             txt = ""
-        m = _find_url(txt) if txt else ""
-        if not m:
-            messagebox.showinfo("提示", "剪贴板里没有找到 http/https 链接", parent=self.root)
+        if not txt:
+            messagebox.showinfo("提示", "剪贴板是空的", parent=self.root)
             return
-        self.new_download({"url": m})
+        self.new_download({"url": txt})
 
     def _selected_tids(self) -> list[str]:
         return list(self.tree.selection())

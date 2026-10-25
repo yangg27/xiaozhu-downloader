@@ -14,19 +14,30 @@ bt_trackers.py · 小助下载管理器 XZDM · BT Trackers 自动更新器
 from __future__ import annotations
 
 import os
+import socket
 import ssl
 import sys
 import threading
 import time
 import urllib.request
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
-# 订阅源（按优先级排序，全部走 https）
+# 订阅源（按优先级排序，多个源聚合去重）
 # ---------------------------------------------------------------------------
+# 主源：trackerslist 的精选/全量/协议分类
 TRACKER_SOURCES = [
     "https://cf.trackerslist.com/best.txt",
+    "https://cf.trackerslist.com/all.txt",
+    "https://cf.trackerslist.com/http.txt",
+    "https://cf.trackerslist.com/udp.txt",
+]
+# 备用镜像（当主源不可达时）
+TRACKER_SOURCES_MIRROR = [
     "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt",
+    "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt",
     "https://cdn.jsdelivr.net/gh/XIU2/TrackersListCollection@master/best.txt",
+    "https://cdn.jsdelivr.net/gh/XIU2/TrackersListCollection@master/all.txt",
 ]
 
 # 离线兜底 trackers（2026-10 实测高可用）
@@ -111,17 +122,74 @@ def fetch_one(url: str, timeout: float = 8.0) -> str:
         return raw.decode("latin-1", errors="replace")
 
 
+def _protocol_rank(t: str) -> int:
+    """协议优先级：UDP 优先（穿透强），HTTPS 其次，HTTP 兜底，WSS 最后。"""
+    tl = t.lower()
+    if tl.startswith("udp://"):
+        return 0
+    if tl.startswith("https://"):
+        return 1
+    if tl.startswith("http://"):
+        return 2
+    if tl.startswith(("wss://", "ws://")):
+        return 3
+    return 4
+
+
+def _split_sources(text: str) -> list[str]:
+    """把用户输入的源字符串（逗号/空格/换行分隔）拆成 URL 列表。"""
+    out = []
+    for raw in (text or "").replace(",", "\n").splitlines():
+        t = raw.strip()
+        if t.startswith(("http://", "https://")):
+            out.append(t)
+    return out
+
+
 def fetch_trackers(sources: list[str] | None = None,
-                   timeout: float = 8.0) -> tuple[list[str], str]:
-    """依次尝试订阅源，返回 (trackers, source_url)。全失败时返回 ([], '')。"""
-    for url in (sources or TRACKER_SOURCES):
+                   timeout: float = 8.0,
+                   extra_sources: list[str] | None = None,
+                   custom_source: str = "") -> tuple[list[str], str]:
+    """
+    依次尝试订阅源并聚合去重。
+    返回 (trackers, source_url)。全失败时返回 ([], '')。
+    策略：优先源逐个尝试直到拿到有效列表；如全部失败再尝试备用镜像。
+    最终按协议优先级排序并去重。
+    """
+    all_sources = list(sources or TRACKER_SOURCES)
+    if custom_source:
+        all_sources = _split_sources(custom_source) + all_sources
+    if extra_sources:
+        all_sources.extend(extra_sources)
+
+    collected: list[str] = []
+    seen = set()
+    first_source = ""
+
+    for url in all_sources:
         try:
             body = fetch_one(url, timeout=timeout)
             lst = parse_trackers(body)
-            if lst:
-                return lst, url
+            if not lst:
+                continue
+            if not first_source:
+                first_source = url
+            for t in lst:
+                if t not in seen:
+                    seen.add(t)
+                    collected.append(t)
+            # 拿到主源即可继续尝试更多源以扩充列表，但不强制中断
         except Exception:
             continue
+
+    if not collected and not sources:
+        # 主源全失败，尝试备用镜像
+        return fetch_trackers(sources=TRACKER_SOURCES_MIRROR, timeout=timeout)
+
+    if collected:
+        # 按协议优先级排序，同协议内保持原顺序
+        collected.sort(key=_protocol_rank)
+        return collected, first_source or "aggregated"
     return [], ""
 
 
@@ -179,11 +247,104 @@ def meta_info() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tracker 可用性探测（可选，启动后后台执行）
+# ---------------------------------------------------------------------------
+def _tracker_host_port(t: str) -> tuple[str, int] | None:
+    """从 tracker URL 提取主机和端口。"""
+    try:
+        u = urlparse(t)
+        host = u.hostname
+        port = u.port
+        if not host or not port:
+            return None
+        return host, port
+    except Exception:
+        return None
+
+
+def probe_tracker(t: str, timeout: float = 3.0) -> bool:
+    """
+    快速探测 tracker 是否可达。
+    UDP tracker：connect 阶段无法完成完整握手，只能做 DNS + 端口 connect 初筛；
+    HTTP/HTTPS tracker：解析并尝试 TCP 连接。
+    返回 True 表示至少主机端口可解析并连接成功。
+    """
+    hp = _tracker_host_port(t)
+    if not hp:
+        return False
+    host, port = hp
+    try:
+        # 先解析 DNS（顺带验证域名有效）
+        addr = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+        if not addr:
+            return False
+    except Exception:
+        return False
+
+    # UDP tracker 只做端口 connect（UDP connect 不真正发包，但可验证路由可达）
+    if t.lower().startswith("udp://"):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            sock.connect((addr[0][4][0], port))
+            sock.close()
+            return True
+        except Exception:
+            return False
+
+    # HTTP/HTTPS 做 TCP 连接
+    is_https = t.lower().startswith("https://")
+    try:
+        sock = socket.socket(addr[0][0], socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((addr[0][4][0], port))
+        if is_https:
+            # 简单 TLS 握手探测
+            ctx = ssl.create_default_context()
+            with ctx.wrap_socket(sock, server_hostname=host) as _:
+                return True
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
+def filter_alive(trackers: list[str], max_workers: int = 32,
+                 timeout: float = 3.0) -> tuple[list[str], list[tuple[str, bool]]]:
+    """
+    多线程探测 tracker 可用性。返回 (alive_list, full_results)。
+    注意：这是端口层可达性，不等价于 tracker 真能 announce，但可剔除大量无效节点。
+    """
+    results: list[tuple[str, bool]] = []
+    lock = threading.Lock()
+
+    def check(t: str):
+        ok = probe_tracker(t, timeout=timeout)
+        with lock:
+            results.append((t, ok))
+
+    threads = []
+    for t in trackers:
+        while len(threads) >= max_workers:
+            threads[0].join(timeout=0.1)
+            threads = [th for th in threads if th.is_alive()]
+        th = threading.Thread(target=check, args=(t,), daemon=True)
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join()
+
+    alive = [t for t, ok in results if ok]
+    return alive, results
+
+
+# ---------------------------------------------------------------------------
 # 主入口：同步与异步
 # ---------------------------------------------------------------------------
 def get_trackers(*, prefer_cache: bool = True,
                  allow_fetch: bool = True,
-                 timeout: float = 8.0) -> tuple[list[str], str]:
+                 timeout: float = 8.0,
+                 custom_source: str = "") -> tuple[list[str], str]:
     """获取 tracker 列表。
     返回 (trackers, source_desc)。
     策略：缓存（新鲜）→ 网络拉取 → 缓存（陈旧）→ 内置兜底
@@ -196,7 +357,7 @@ def get_trackers(*, prefer_cache: bool = True,
         return cached, f"cache<{meta.get('source','')}>"
 
     if allow_fetch:
-        lst, src = fetch_trackers(timeout=timeout)
+        lst, src = fetch_trackers(timeout=timeout, custom_source=custom_source)
         if lst:
             save_cache(lst, src)
             return lst, src
@@ -206,10 +367,11 @@ def get_trackers(*, prefer_cache: bool = True,
     return list(FALLBACK_TRACKERS), "builtin-fallback"
 
 
-def update_async(callback=None, timeout: float = 8.0) -> threading.Thread:
+def update_async(callback=None, timeout: float = 8.0,
+                 custom_source: str = "") -> threading.Thread:
     """启动后台线程更新 trackers。完成后回调 callback(trackers, source)。"""
     def work():
-        lst, src = fetch_trackers(timeout=timeout)
+        lst, src = fetch_trackers(timeout=timeout, custom_source=custom_source)
         if lst:
             save_cache(lst, src)
         if callback:
