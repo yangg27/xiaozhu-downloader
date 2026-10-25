@@ -52,7 +52,7 @@ import urllib.request
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.0.0"
+ENGINE_VERSION = "3.0.1"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -2382,9 +2382,13 @@ class FileDownload(DownloadTask):
 # --------------------------------------------------------------------------
 
 class BTDownload(DownloadTask):
-    """BT 种子 / 磁力链下载：直接走内置 aria2c 子进程。
-    与 FileDownload 的"失败时切换 aria2c"不同，BTDownload 一开始就使用 aria2c，
-    因为内置引擎只实现了 HTTP/HLS。
+    """BT 种子 / 磁力链下载：走内置 aria2c 子进程。
+
+    v3.0.1 增强：
+    - 自动检测输入类型（magnet / .torrent 本地路径 / .torrent URL）
+    - 磁力链优先尝试 metadata-only 转成 .torrent，提高成功率
+    - HTTP .torrent 自动下载到本地缓存并解析
+    - DHT/PEX/LPD 与 Tracker 三者协同：tracker 少/无效时自动依赖 DHT/PEX
     """
 
     def __init__(self, *a, **kw):
@@ -2394,24 +2398,64 @@ class BTDownload(DownloadTask):
     def _session(self):
         try:
             import aria2_bridge
+            import bt_helper
+            import bt_trackers
         except Exception as exc:
-            raise RuntimeError(f"aria2c 通道不可用：{exc}")
+            raise RuntimeError(f"aria2c/BT 通道不可用：{exc}")
 
         # 取最新 trackers（缓存优先，无缓存同步拉一次）
         trackers = []
         try:
-            import bt_trackers
             trackers, src = bt_trackers.get_trackers(
                 prefer_cache=True, allow_fetch=True, timeout=5.0,
                 custom_source=self.mgr.cfg.get("bt_tracker_source", ""))
             LOG.debug("BT trackers 来源: %s, 共 %d 条", src, len(trackers))
         except Exception:
-            LOG.debug("bt_trackers 拉取失败，仅用 DHT")
+            LOG.debug("bt_trackers 拉取失败，仅用 DHT/PEX/LPD")
 
-        self.phase = "BT 解析元数据…"
+        # 自动规范化输入：磁力链→转种子、HTTP种子→下载、本地种子→解析
+        cache_dir = os.path.join(self.mgr.data_dir, "bt_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        self.phase = "BT 自动检测输入…"
         self.mgr.notify()
+        try:
+            norm = bt_helper.normalize_bt_input(
+                self.url, cache_dir=cache_dir, trackers=trackers,
+                headers=dict(self.http.extra),
+                proxy=self.http._proxy,
+                magnet_timeout=300.0)
+        except Exception as exc:
+            raise RuntimeError(f"BT 输入处理失败：{exc}")
+
+        target_url = norm["url"]
+        info = norm.get("info") or {}
+        protocols = bt_helper.recommend_protocols(info)
+        LOG.debug("BT 输入规范化: kind=%s, converted=%s, protocols=%s",
+                  norm["kind"], norm.get("converted"), protocols)
+
+        # UI 提示当前采用的协议组合
+        if "Tracker" in protocols:
+            self.phase = f"BT 下载中（Tracker+DHT+PEX）"
+        else:
+            self.phase = f"BT 下载中（DHT+PEX+LPD，无 Tracker）"
+        self.mgr.notify()
+
+        # 记录种子元信息到 extra，便于 UI 展示
+        try:
+            self.extra["bt_info"] = {
+                "name": info.get("name", ""),
+                "info_hash": info.get("info_hash", ""),
+                "total_length": info.get("total_length", 0),
+                "trackers": info.get("trackers", []),
+                "files": info.get("files", []),
+                "converted_from_magnet": norm.get("converted", False),
+                "protocols": protocols,
+            }
+        except Exception:
+            pass
+
         result = aria2_bridge.run_aria2(
-            self.url, self.out_dir, filename=self.filename,
+            target_url, self.out_dir, filename=self.filename,
             referer=self.http.referer, cookie=self.http.cookie,
             headers=dict(self.http.extra),
             user_agent=self.http.ua,
@@ -2421,7 +2465,6 @@ class BTDownload(DownloadTask):
             task=self)
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "aria2c BT 下载失败"))
-        # run_aria2 已自动把 task 状态置为 done
         # 附加记录：种子文件列表
         try:
             self.extra["bt_files"] = result.get("files", [])

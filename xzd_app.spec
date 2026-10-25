@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-小助下载管理器 XZDM · PyInstaller 打包配置（v3.0.0）
+小助下载管理器 XZDM · PyInstaller 打包配置（v3.0.1）
 ==========================================
 产物形态：**one-dir**（`小助下载器.exe` + `_internal/`），不是 one-file。
 
@@ -61,8 +61,9 @@ a = Analysis(
         "tray", "localserver", "sysintegration", "dlcore", "aria2_bridge",
         # v3.0.0: BT 支持
         "bt_trackers",
-        # v3.1.0: 种子文件解析
+        # v3.0.1: 种子文件解析 + BT 自动规范化
         "torrent_parser",
+        "bt_helper",
         "tkinter", "tkinter.filedialog", "tkinter.messagebox", "tkinter.ttk",
         "http.server", "http.client", "urllib.request", "urllib.parse",
         "urllib.error", "urllib.response", "ssl", "_ssl", "socket", "select",

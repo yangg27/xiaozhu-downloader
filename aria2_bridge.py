@@ -445,11 +445,11 @@ class Aria2Bridge:
             for t in udp_tr:
                 if t not in tr:
                     tr.append(t)
-                if len(tr) >= 40: break
+                if len(tr) >= 25: break
             for t in http_tr:
                 if t not in tr:
                     tr.append(t)
-                if len(tr) >= 50: break
+                if len(tr) >= 30: break
             if tr:
                 cmd.append("--bt-tracker=" + ",".join(tr))
         if self.user_agent:
