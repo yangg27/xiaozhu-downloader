@@ -575,7 +575,7 @@ def e1(ctx):
     ratio = el / expected
     got = open(t.created_final or t.final_path(), "rb").read()
     assert _digest(got) == _digest(payload), "限速下载内容不一致"
-    # 令牌桶 burst=256KB，允许 ±45% 偏差
+    # 4MB @ 500KB/s；允许调度与读写产生 ±45% 偏差。
     assert 0.55 <= ratio <= 1.45, \
         "限速失准：目标 %.1fs，实测 %.1fs（比值 %.2f）" % (expected, el, ratio)
     return "限速 %d KB/s，%s 数据耗时 %.2fs（理论 %.2fs，偏差 %+.0f%%）" % (
@@ -584,7 +584,7 @@ def e1(ctx):
 
 @case("E 限速", "E2_运行中改限速_立即生效")
 def e2(ctx):
-    size = 12 * 1024 * 1024
+    size = 24 * 1024 * 1024
     payload = RangeServer.make_payload(size, seed=53)
     srv = RangeServer({"/chg.bin": payload}).start()
     tmp = tempfile.mkdtemp(prefix="xzd_E2_")
@@ -592,19 +592,48 @@ def e2(ctx):
     t = mgr.add_task(srv.url("/chg.bin"), out_dir=os.path.join(tmp, "dl"),
                      speed_limit=1 * 1024 * 1024)
     _wait_state(t, {dlcore.STATE_DOWNLOADING}, timeout=30)
-    time.sleep(1.0)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and t.done_bytes < 2 * 1024 * 1024:
+        time.sleep(0.02)
+    assert t.done_bytes >= 2 * 1024 * 1024, "第一阶段没有真实下载数据"
     rate_before = t.limiter.rate
+    # ★ 测量口径修正（不放宽阈值，只消除量化伪影）：
+    #   done_bytes 是**按 1MB 块跳变的阶梯量**（_mark_block 里整块才累加），
+    #   而 8 个线程的块完成会成簇 —— 全量台账 probe-e2-v5.json 实测：
+    #     t=9.488→9.801 的 0.313s 内连续完成 5 个块（5MiB）
+    #   于是任意 3 秒窗口扫描得到的"最坏窗口"达 2.30MB/s，而**长期平均**
+    #   只有 1.11MB/s（12MiB/10.797s，与设定 1MB/s 相符）。
+    #   3 秒 × 1MB/s = 3MiB 的样本量只等于 3 个块，±1 块 = ±33% 量化误差，
+    #   窗口恰好包含块完成簇时必然误报超发。
+    #   故把窗口延长到 8 秒（8MiB 预期，±1 块误差降到 12.5%），
+    #   阈值仍为 1.5×1MB/s 不变；同时补一条长期均值断言交叉验证。
+    SLOW_WIN = 8.0
+    b0, elapsed0 = t.done_bytes, time.monotonic()
+    time.sleep(SLOW_WIN)
+    b1, elapsed1 = t.done_bytes, time.monotonic()
+    slow_bps = (b1 - b0) / max(0.001, elapsed1 - elapsed0)
+    assert t.state == dlcore.STATE_DOWNLOADING, "测速样本不足，任务提前完成"
     t.set_speed_limit(3 * 1024 * 1024)   # 1MB/s → 3MB/s
     rate_after = t.limiter.rate
     task_limit_after = t.speed_limit
+    # 改速后同样用 4 秒窗口（3MB/s × 4s = 12MiB 预期，量化误差可忽略）
+    b2, elapsed2 = t.done_bytes, time.monotonic()
+    time.sleep(4.0)
+    b3, elapsed3 = t.done_bytes, time.monotonic()
+    fast_bps = (b3 - b2) / max(0.001, elapsed3 - elapsed2)
+    st = _wait_done(t, timeout=90)
     srv.stop()
-    t.cancel(delete_files=True)
+    assert st == dlcore.STATE_DONE, "动态限速后任务未完成: %s" % t.err
+    assert open(t.created_final, "rb").read() == payload, "动态限速后内容损坏"
     assert rate_before == 1 * 1024 * 1024, "初始限速未生效: %s" % rate_before
     assert rate_after == 3 * 1024 * 1024, \
         "运行时改限速未生效: limiter.rate=%s, task.speed_limit=%s" % (
             rate_after, task_limit_after)
-    return "limiter.rate 由 %s 实时改为 %s（1MB/s → 3MB/s）" % (
-        dlcore.human_speed(rate_before), dlcore.human_speed(rate_after))
+    assert slow_bps <= 1.5 * 1024 * 1024, "改速前吞吐偏离 1MB/s: %.0f" % slow_bps
+    assert fast_bps >= 2.0 * 1024 * 1024, "改速后实际吞吐未提升: %.0f" % fast_bps
+    assert fast_bps > slow_bps * 1.5, "改速前后真实吞吐无明显差异"
+    return "实际吞吐 %.2fMB/s → %.2fMB/s；limiter.rate 同步改为 %s，内容校验通过" % (
+        slow_bps / 1048576, fast_bps / 1048576, dlcore.human_speed(rate_after))
 
 
 @case("E 限速", "E3_低速限速不死锁_单次请求大于burst")
@@ -642,7 +671,7 @@ def e3(ctx):
 
 @case("E 限速", "E4_极低速限速不死锁_限速小于单次读取")
 def e4(ctx):
-    """回归：限速 1KB/s（远小于 READ_SIZE 与 burst 下限），必须仍能完成。"""
+    """回归：64KB/s（低于令牌桶下限）必须能完成且真实限速。"""
     size = 256 * 1024
     payload = RangeServer.make_payload(size, seed=59)
     srv = RangeServer({"/vslow.bin": payload}).start()
@@ -659,7 +688,13 @@ def e4(ctx):
     assert st == dlcore.STATE_DONE, \
         "极低速死锁！state=%s done=%s err=%s" % (
             st, dlcore.human_size(t.done_bytes), t.err)
-    return "限速 %s（低于 burst 下限 256KB）完成，耗时 %.1fs" % (
+    got = open(t.created_final or t.final_path(), "rb").read()
+    assert got == payload, "低限速下载内容不一致"
+    # v3.1.10: 除不死锁外还必须真的限速。旧版预支整个 burst，
+    # 256KB @ 64KB/s 仅 0.1s 完成，实际上绕过了用户限速。
+    assert 3.0 <= el <= 12.0, \
+        "64KB/s 下载 256KB 应约 4s，实测 %.2fs（限速未生效或异常缓慢）" % el
+    return "限速 %s，256KB 实测 %.2fs，内容一致" % (
         dlcore.human_speed(64 * 1024), el)
 
 
@@ -1159,9 +1194,9 @@ def _http(method, url, body=None, token="", headers=None):
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+            return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
 
 
 @case("K localserver", "K1_全部GET路由")
@@ -1171,44 +1206,44 @@ def k1(ctx):
     mgr, lapi, holder = _start_api(tmp, port)
     base = "http://127.0.0.1:%d" % port
     try:
-        st, body = _http("GET", base + "/ping")
+        st, body, _headers = _http("GET", base + "/ping")
         assert st == 200 and json.loads(body)["ok"], "ping 失败: %s %s" % (st, body)
         j = json.loads(body)
         assert j["version"] == dlcore.ENGINE_VERSION, "ping 版本不符: %s" % j
         token = j.get("token", "")
         assert token, "/ping 未返回 token"
 
-        st, body = _http("GET", base + "/")
+        st, body, _headers = _http("GET", base + "/")
         assert st == 200 and json.loads(body)["ok"], "/ 失败"
-        st, body = _http("GET", base + "/help")
+        st, body, _headers = _http("GET", base + "/help")
         assert st == 200, "/help 失败: %s %s" % (st, body)
         assert holder.get("help") is True, "/help 未触发回调"
 
         # 需要 token 的
         for path in ("/status", "/history", "/sniff"):
-            st, body = _http("GET", base + path)
+            st, body, _headers = _http("GET", base + path)
             assert st == 401, "%s 无 token 应 401，实际 %s" % (path, st)
-            st, body = _http("GET", base + path, token=token)
+            st, body, _headers = _http("GET", base + path, token=token)
             assert st == 200, "%s 带 token 失败: %s %s" % (path, st, body[:120])
             assert json.loads(body)["ok"], "%s 返回 ok=False" % path
 
         # /scan 参数校验
-        st, body = _http("GET", base + "/scan?url=notaurl", token=token)
+        st, body, _headers = _http("GET", base + "/scan?url=notaurl", token=token)
         assert st == 400, "/scan 非法 url 应 400，实际 %s" % st
 
         # /wake
-        st, body = _http("GET", base + "/wake?link=xzd://show", token=token)
+        st, body, _headers = _http("GET", base + "/wake?link=xzd://show", token=token)
         assert st == 200, "/wake 失败: %s %s" % (st, body)
         assert holder.get("wake") == "xzd://show", "wake 回调未收到链接"
-        st, body = _http("GET", base + "/wake", token=token)
+        st, body, _headers = _http("GET", base + "/wake", token=token)
         assert st == 400, "/wake 缺 link 应 400，实际 %s" % st
 
         # 未知道路
-        st, body = _http("GET", base + "/nope")
+        st, body, _headers = _http("GET", base + "/nope")
         assert st == 404, "未知路径应 404，实际 %s" % st
 
         # OPTIONS 预检
-        st, body = _http("OPTIONS", base + "/add")
+        st, body, _headers = _http("OPTIONS", base + "/add")
         assert st == 200, "OPTIONS 失败: %s" % st
         return "ping/status/history/sniff/scan/help/wake/404/OPTIONS 全通过，token 鉴权生效"
     finally:
@@ -1224,15 +1259,15 @@ def k2(ctx):
     mgr, lapi, holder = _start_api(tmp, port)
     base = "http://127.0.0.1:%d" % port
     try:
-        st, body = _http("GET", base + "/ping")
+        st, body, _headers = _http("GET", base + "/ping")
         token = json.loads(body).get("token", "")
 
         # 无 token → 401
-        st, body = _http("POST", base + "/add", {"url": srv.url("/api.bin")})
+        st, body, _headers = _http("POST", base + "/add", {"url": srv.url("/api.bin")})
         assert st == 401, "/add 无 token 应 401，实际 %s" % st
 
         # /add
-        st, body = _http("POST", base + "/add",
+        st, body, _headers = _http("POST", base + "/add",
                          {"url": srv.url("/api.bin"),
                           "out_dir": os.path.join(tmp, "dl")}, token=token)
         assert st == 200, "/add 失败: %s %s" % (st, body)
@@ -1247,47 +1282,96 @@ def k2(ctx):
         assert t.state == dlcore.STATE_DONE, "API 添加的任务未完成: %s" % t.err
 
         # /add 非法 URL
-        st, body = _http("POST", base + "/add", {"url": "ftp://x/y"}, token=token)
+        st, body, _headers = _http("POST", base + "/add", {"url": "ftp://x/y"}, token=token)
         assert st == 400, "非法 scheme 应 400，实际 %s" % st
 
         # /batch
-        st, body = _http("POST", base + "/batch",
+        st, body, _headers = _http("POST", base + "/batch",
                          {"items": [{"url": srv.url("/api.bin")},
                                     {"url": srv.url("/api.bin")}],
                           "page": "http://x/p"}, token=token)
         assert st == 200, "/batch 失败: %s %s" % (st, body)
         j = json.loads(body)
         assert len(j["results"]) == 2, "batch 结果数不符: %s" % j
-        st, body = _http("POST", base + "/batch", {"items": "notalist"}, token=token)
+        st, body, _headers = _http("POST", base + "/batch", {"items": "notalist"}, token=token)
         assert st == 400, "batch 非数组应 400，实际 %s" % st
 
         # /sniff
-        st, body = _http("POST", base + "/sniff",
+        st, body, _headers = _http("POST", base + "/sniff",
                          {"items": [{"url": "http://x/s1.mp4"},
                                     {"url": "http://x/s2.mp4"}],
                           "page": "http://x/p2"}, token=token)
         assert st == 200, "/sniff 失败: %s %s" % (st, body)
         assert json.loads(body)["added"] == 2, "sniff 入库数不符: %s" % body
 
-        # /open —— 重点：folder 模式此前会 NameError
-        st, body = _http("POST", base + "/open",
-                         {"tid": tid, "mode": "file"}, token=token)
-        ok_file = (st == 200)
-        st2, body2 = _http("POST", base + "/open",
-                           {"tid": tid, "mode": "folder"}, token=token)
-        # folder 会真的弹资源管理器，只要不是 500 (NameError) 就算通过
-        assert "NameError" not in body2, \
-            "/open folder 模式仍报 NameError！body=%s" % body2
-        st3, body3 = _http("POST", base + "/open",
+        # /open —— 必须验证真实调用目标，而不是"不报错就算过"。
+        # 产品实现分工：
+        #   · file 模式 → os.startfile(target)（交给系统默认程序打开文件）
+        #   · folder 模式 → explorer <dir> 或 explorer /select,<file>
+        # 因此需要分别拦截这两个入口。
+        import localserver as _ls
+        opened_files = []
+        explorer_calls = []
+        real_popen = _ls.subprocess.Popen
+        real_startfile = getattr(_ls.os, "startfile", None)
+
+        class _FakePopen:
+            def __init__(self, args, *a, **kw):
+                explorer_calls.append([str(x) for x in args])
+
+            def poll(self):
+                return 0
+
+        _ls.subprocess.Popen = _FakePopen
+        _ls.os.startfile = lambda p: opened_files.append(str(p))
+        try:
+            target = t.created_final or t.final_path()
+            folder = os.path.dirname(target)
+
+            st, body, _headers = _http("POST", base + "/open",
+                            {"tid": tid, "mode": "file"}, token=token)
+            assert st == 200, "/open(file) 应 200，实际 %s %s" % (st, body)
+            assert opened_files, "/open(file) 未真实调用系统打开文件"
+            assert os.path.normcase(os.path.normpath(opened_files[-1])) == \
+                os.path.normcase(os.path.normpath(target)), \
+                "file 模式打开的不是下载文件：%r vs %r" % (opened_files[-1], target)
+
+            st2, body2, _headers2 = _http("POST", base + "/open",
+                            {"tid": tid, "mode": "folder"}, token=token)
+            assert st2 == 200, "/open(folder) 应 200，实际 %s %s" % (st2, body2)
+            assert explorer_calls, "/open(folder) 未真实调用资源管理器"
+            argv2 = explorer_calls[-1]
+            assert argv2[0].lower().startswith("explorer"), \
+                "folder 模式应调用 explorer，实际 %r" % argv2
+            # 文件模式目录：explorer /select,<file>；目录产物：explorer <dir>
+            joined = [os.path.normcase(os.path.normpath(x)) for x in argv2]
+            want = os.path.normcase(os.path.normpath(target))
+            assert (any(x == want for x in joined) or
+                    any(folder and
+                        os.path.normcase(os.path.normpath(folder)) == x for x in joined)), \
+                "folder 模式定位目标不符：argv=%r target=%s" % (argv2, target)
+        finally:
+            _ls.subprocess.Popen = real_popen
+            if real_startfile is not None:
+                _ls.os.startfile = real_startfile
+
+        # 不存在的 tid：必须 404，且不得触发任何打开调用
+        before_file, before_exp = len(opened_files), len(explorer_calls)
+        st3, body3, _headers3 = _http("POST", base + "/open",
                            {"tid": "nonexistent", "mode": "file"}, token=token)
         assert st3 == 404, "不存在 tid 应 404，实际 %s" % st3
+        assert (len(opened_files) == before_file
+                and len(explorer_calls) == before_exp), \
+            "不存在的 tid 仍触发了打开调用"
 
         # 未知道路
-        st, body = _http("POST", base + "/nope", {}, token=token)
+        st, body, _headers = _http("POST", base + "/nope", {}, token=token)
         assert st == 404, "POST 未知路径应 404，实际 %s" % st
 
         srv.stop()
-        return "/add(+out_dir透传+非法URL) /batch /sniff /open(file=%s/folder无NameError/404) 全通过" % ok_file
+        return ("/add(+out_dir透传+非法URL) /batch /sniff "
+                "/open(file 实测 os.startfile 打开真实文件、folder 实测 explorer 定位、"
+                "不存在 tid 404 且零调用) 全通过")
     finally:
         lapi.stop()
         srv.stop()
@@ -1317,7 +1401,7 @@ def k3(ctx):
         #   测试必然误判"没顺延"（v3.1.8 修正）。
         real = getattr(lapi, "actual_port", lapi.port)
         base = "http://127.0.0.1:%d" % real
-        st, body = _http("GET", base + "/ping")
+        st, body, _headers = _http("GET", base + "/ping")
         ok = (real != port and real > port)
         lapi.stop()
         assert ok, "端口未顺延：期望 ≠%d，实际 %d" % (port, real)
@@ -1334,24 +1418,52 @@ def k4(ctx):
     mgr, lapi, holder = _start_api(tmp, port)
     base = "http://127.0.0.1:%d" % port
     try:
-        # 恶意网页 Origin
-        st, body = _http("GET", base + "/status",
-                         headers={"Origin": "http://evil.com"})
+        # 恶意网页 Origin → 拒绝（且不得回任何 CORS 放行头）
+        st, body, headers = _http("GET", base + "/status",
+                                  headers={"Origin": "http://evil.com"})
         assert st == 403, "恶意 Origin 应 403，实际 %s" % st
-        # 扩展 Origin 放行
-        st, body = _http("GET", base + "/ping",
-                         headers={"Origin": "chrome-extension://abcdefg"})
+        assert not headers.get("Access-Control-Allow-Origin"), \
+            "被拒 Origin 不得回 ACAO 头：%r" % headers.get("Access-Control-Allow-Origin")
+        assert headers.get("Vary") == "Origin", "缺少 Vary: Origin，实际 %r" % headers.get("Vary")
+
+        # 伪装扩展地址（带路径/用户信息）必须被拒，不能只看前缀
+        for bad in ("chrome-extension://abcdefg/evil",
+                    "chrome-extension://user@abcdefg",
+                    "chrome-extension://abcdefg:8080"):
+            st, body, headers = _http("GET", base + "/ping", headers={"Origin": bad})
+            assert st == 403, "伪装 Origin 应 403：%s → %s" % (bad, st)
+            assert not headers.get("Access-Control-Allow-Origin"), \
+                "伪装 Origin 不得回 ACAO：%s" % bad
+
+        # 扩展 Origin 放行，且 CORS 头必须是精确反射 + Vary
+        st, body, headers = _http("GET", base + "/ping",
+                                  headers={"Origin": "chrome-extension://abcdefg"})
         assert st == 200, "扩展 Origin 应放行，实际 %s" % st
-        assert "Access-Control-Allow-Origin" in body or True
-        # 扩展 Origin 且带 token
-        st, body = _http("GET", base + "/ping",
-                         headers={"Origin": "chrome-extension://abcdefg"})
+        acao = headers.get("Access-Control-Allow-Origin")
+        assert acao == "chrome-extension://abcdefg", \
+            "ACAO 未精确反射，实际 %r" % acao
+        assert headers.get("Vary") == "Origin", "缺少 Vary: Origin"
         tk = json.loads(body).get("token", "")
         assert tk, "扩展 Origin 应能拿到 token"
-        st, body = _http("GET", base + "/status",
-                         headers={"Origin": "chrome-extension://abcdefg"}, token=tk)
+
+        # 扩展 Origin 带 token → /status 放行
+        st, body, headers = _http("GET", base + "/status",
+                                  headers={"Origin": "chrome-extension://abcdefg"}, token=tk)
         assert st == 200, "扩展 Origin 带 token 应放行，实际 %s" % st
-        return "恶意 Origin 403；chrome-extension 放行并可获取 token"
+
+        # 无 Origin（真实扩展 Service Worker 的 /ping、/status 实测无 Origin）
+        st, body, headers = _http("GET", base + "/ping")
+        assert st == 200, "无 Origin 的本机调用应放行，实际 %s" % st
+        assert json.loads(body).get("token"), "无 Origin 本机调用应拿到 token"
+
+        # 预检：恶意 Origin 403，合法扩展 Origin 200
+        st, body, headers = _http("OPTIONS", base + "/add",
+                                  headers={"Origin": "http://evil.com"})
+        assert st == 403, "恶意 Origin 预检应 403，实际 %s" % st
+        st, body, headers = _http("OPTIONS", base + "/add",
+                                  headers={"Origin": "chrome-extension://abcdefg"})
+        assert st == 200, "扩展 Origin 预检应 200，实际 %s" % st
+        return "恶意/伪装 Origin 全部 403 且无 ACAO；扩展 Origin 精确反射 + Vary；无 Origin 本机放行；预检行为正确"
     finally:
         lapi.stop()
 
@@ -1368,20 +1480,20 @@ def k5(ctx):
     base = "http://127.0.0.1:%d" % lapi.actual_port
     slow_srv = None
     try:
-        st, body = _http("GET", base + "/ping")
+        st, body, _headers = _http("GET", base + "/ping")
         token = json.loads(body).get("token", "")
 
         # 先加一个"长跑"任务占住活动列表（服务器全局限速，测期内不会结束）
         slow_srv = RangeServer({"/slow.bin": RangeServer.make_payload(
             4 * 1024 * 1024, seed=132)}, global_rate_bps=256 * 1024).start()
-        st, body = _http("POST", base + "/add",
+        st, body, _headers = _http("POST", base + "/add",
                          {"url": slow_srv.url("/slow.bin"),
                           "out_dir": os.path.join(tmp, "dl")}, token=token)
         assert st == 200, "/add(slow) 失败: %s %s" % (st, body)
         tid_slow = json.loads(body)["tid"]
 
         # 再放一个立即完成的任务
-        st, body = _http("POST", base + "/add",
+        st, body, _headers = _http("POST", base + "/add",
                          {"url": srv.url("/b.bin"), "out_dir": os.path.join(tmp, "dl"),
                           "filename": "b.bin"},
                          token=token)
@@ -1390,7 +1502,7 @@ def k5(ctx):
         _wait_done(t_fast, timeout=90)
         assert t_fast.state == dlcore.STATE_DONE, "任务未完成: %s" % t_fast.err
 
-        st, body = _http("GET", base + "/status", token=token)
+        st, body, _headers = _http("GET", base + "/status", token=token)
         assert st == 200, "/status 失败: %s" % st
         j = json.loads(body)
         states = {x["tid"]: x["state"] for x in j["tasks"]}
@@ -1400,7 +1512,7 @@ def k5(ctx):
         assert j.get("total_count", 0) >= 1, "total_count 未提供"
 
         # 已完成任务必须能在 /history 里找到，且带 final 路径与 exists 标记
-        st, body = _http("GET", base + "/history?limit=10", token=token)
+        st, body, _headers = _http("GET", base + "/history?limit=10", token=token)
         assert st == 200, "/history 失败: %s" % st
         hist = json.loads(body)["items"]
         hit = [h for h in hist if h.get("tid") == tid_fast]
@@ -1436,9 +1548,9 @@ def k6(ctx):
     mgr, lapi, holder = _start_api(tmp, port)
     base = "http://127.0.0.1:%d" % lapi.actual_port
     try:
-        st, body = _http("GET", base + "/ping")
+        st, body, _headers = _http("GET", base + "/ping")
         token = json.loads(body).get("token", "")
-        st, body = _http("POST", base + "/add",
+        st, body, _headers = _http("POST", base + "/add",
                          {"url": srv.url("/h.bin"), "out_dir": os.path.join(tmp, "dl"),
                           "filename": "h.bin"}, token=token)
         tid = json.loads(body)["tid"]
@@ -1448,7 +1560,7 @@ def k6(ctx):
         assert os.path.exists(final), "文件未落盘: %s" % final
 
         # ① 活动任务里能打开（不真的弹窗口，只校验返回结构）
-        st, body = _http("POST", base + "/open", {"tid": tid, "mode": "file"}, token=token)
+        st, body, _headers = _http("POST", base + "/open", {"tid": tid, "mode": "file"}, token=token)
         assert st == 200, "/open(file) 应 200，实际 %s %s" % (st, body)
 
         # ② 模拟「重启后」：新 Manager 从同一 data_dir 加载，
@@ -1463,27 +1575,27 @@ def k6(ctx):
         api2.start()
         base2 = "http://127.0.0.1:%d" % api2.actual_port
         try:
-            st, body = _http("GET", base2 + "/ping")
+            st, body, _headers = _http("GET", base2 + "/ping")
             tk2 = json.loads(body).get("token", "")
-            st, body = _http("POST", base2 + "/open",
+            st, body, _headers = _http("POST", base2 + "/open",
                              {"tid": tid, "mode": "folder"}, token=tk2)
             assert st == 200, \
                 "重启后 /open(folder) 应能从 history 打开，实际 %s %s（问题5b 回归）" % (st, body)
 
             # ③ 文件被删除后：folder 仍打开目录并带 note；file 明确报错
             os.remove(final)
-            st, body = _http("POST", base2 + "/open",
+            st, body, _headers = _http("POST", base2 + "/open",
                              {"tid": tid, "mode": "folder"}, token=tk2)
             j = json.loads(body)
             assert st == 200 and j.get("ok"), "文件删除后 folder 应仍能打开目录: %s" % body
             assert j.get("note"), "文件已失效时应给出 note 提示: %s" % body
-            st, body = _http("POST", base2 + "/open",
+            st, body, _headers = _http("POST", base2 + "/open",
                              {"tid": tid, "mode": "file"}, token=tk2)
             assert st == 404, "文件删除后 file 应 404，实际 %s" % st
             assert "不存在" in body, "错误信息应说明文件不存在: %s" % body
 
             # ④ 完全不存在的 tid
-            st, body = _http("POST", base2 + "/open",
+            st, body, _headers = _http("POST", base2 + "/open",
                              {"tid": "ffffffffffff", "mode": "folder"}, token=tk2)
             assert st == 404, "未知 tid 应 404，实际 %s" % st
         finally:
@@ -1519,13 +1631,16 @@ def k7(ctx):
     mgr.cfg["download_dir"] = os.path.join(tmp, "dl")
     os.makedirs(mgr.cfg["download_dir"], exist_ok=True)
 
-    # ---- ① add_task 同 tid 两次 ----
-    mgr.add_task("http://127.0.0.1:9/dup.bin", tid="dup000000001",
-                 start=False, dedupe=False)
-    mgr.add_task("http://127.0.0.1:9/dup.bin", tid="dup000000001",
-                 start=False, dedupe=False)
-    assert mgr.order.count("dup000000001") == 1, \
-        "同一 tid 在 order 里应只出现一次，实际 %r" % mgr.order
+    # ---- ① 同 tid 两次：必须重分配，而不是覆盖仍存活的原任务 ----
+    t1 = mgr.add_task("http://127.0.0.1:9/a.bin", tid="dup000000001",
+                      start=False, dedupe=False)
+    t2 = mgr.add_task("http://127.0.0.1:9/b.bin", tid="dup000000001",
+                      start=False, dedupe=False)
+    assert t1.tid != t2.tid, "两个任务的 tid 碰撞未被重分配"
+    assert mgr.order.count("dup000000001") == 1
+    assert len(mgr.order) == 2 and len(mgr.tasks) == 2
+    assert mgr.get(t1.tid) is t1 and mgr.get(t2.tid) is t2
+    assert t1.tmp_dir != t2.tmp_dir, "不同任务不得共用续传目录"
 
     # ---- ② snapshots 不重复（GUI insert 的 iid 唯一性前提）----
     snaps = mgr.snapshots()
@@ -1544,18 +1659,18 @@ def k7(ctx):
     mgr2 = dlcore.Manager(data_dir=data)
     mgr2.cfg["download_dir"] = mgr.cfg["download_dir"]
     n = mgr2.load_jobs()
-    assert n == 1, "4 条重复应自愈为 1 条，实际恢复 %d 条" % n
-    assert mgr2.order.count("bad000000001") == 1, \
-        "自愈后 order 仍有重复：%r" % mgr2.order
+    assert n == 4, "4 条重复任务必须全部保留并分配唯一 ID，实际恢复 %d 条" % n
+    assert mgr2.order.count("bad000000001") == 1
     tids2 = [s["tid"] for s in mgr2.snapshots()]
-    assert len(tids2) == len(set(tids2)), "自愈后 snapshots 仍有重复：%r" % tids2
+    assert len(tids2) == 4 and len(set(tids2)) == 4
+    assert len({mgr2.get(t).tmp_dir for t in tids2}) == 4
     mgr2.save_jobs()
     with open(mgr2.jobs_path(), encoding="utf-8") as f:
         after = json.load(f)
-    assert len(after) == 1, "重新保存后 jobs.json 应只剩 1 条，实际 %d" % len(after)
+    assert len(after) == 4 and len({x["tid"] for x in after}) == 4
 
-    return ("同 tid 只入队 1 次；snapshots 无重复；4 条坏的 jobs.json 自愈为 1 条"
-            "且重存不复发")
+    return ("同 tid 自动重分配、任务不丢且目录独立；旧档 4 条重复全部恢复，"
+            "重存后 ID 唯一")
 
 
 @case("K localserver", "K8_多任务下载不死锁_接口全程可用")

@@ -432,8 +432,7 @@ class Aria2Bridge:
             self.task.size = size
             self.task.done_bytes = size
             self.task.progress = 1.0
-            self.task.state = "done"
-            self.task.phase = "已完成（aria2c 备用）"
+            self.task._complete(real_path, "已完成（aria2c 备用）")
         return result
 
     def _find_output(self, expected: str, out_dir: str, since: float):
@@ -578,7 +577,7 @@ class Aria2Bridge:
             real_path = produced[0]
         else:
             # 找最长公共前缀目录
-            real_path = os.path.commonpath(produced) if len(produced) > 1 else produced[0]
+            real_path = os.path.commonpath([os.path.dirname(p) for p in produced])
         try:
             size = 0
             for p in produced:
@@ -603,8 +602,9 @@ class Aria2Bridge:
             self.task.size = size
             self.task.done_bytes = size
             self.task.progress = 1.0
-            self.task.state = "done"
-            self.task.phase = "已完成（BT/磁力）"
+            self.task.extra["bt_files"] = produced
+            self.task.extra["bt_file_count"] = len(produced)
+            self.task._complete(real_path, "已完成（BT/磁力）")
         return result
 
     @staticmethod
@@ -714,8 +714,7 @@ class Aria2Bridge:
             self.task.size = size
             self.task.done_bytes = size
             self.task.progress = 1.0
-            self.task.state = "done"
-            self.task.phase = "已完成（aria2c HLS 备用）"
+            self.task._complete(real_path, "已完成（aria2c HLS 备用）")
         return result
 
 

@@ -26,9 +26,15 @@
       out.push({ url: u, type: type });
     };
     document.querySelectorAll('video, audio').forEach((el) => {
-      if (el.currentSrc) push(el.currentSrc, 'video');
-      if (el.src) push(el.src, 'video');
-      el.querySelectorAll('source').forEach((s) => push(s.src, 'video'));
+      // ★ v3.1.10：按真实标签名上报类型，此前 <audio> 也被标成 video
+      const t = el.tagName === 'AUDIO' ? 'audio' : 'video';
+      if (el.currentSrc) push(el.currentSrc, t);
+      if (el.src) push(el.src, t);
+      el.querySelectorAll('source').forEach((s) => {
+        const st = (s.type || '').startsWith('audio') ? 'audio'
+          : (s.type || '').startsWith('video') ? 'video' : t;
+        push(s.src, st);
+      });
     });
     document.querySelectorAll('source').forEach((s) => push(s.src, 'video'));
     // 播放器常见配置字段
@@ -66,7 +72,11 @@
       items.forEach((it) => { it.fromFrame = true; });
     }
     try {
-      chrome.runtime.sendMessage({ cmd: 'addFound', items: items.slice(0, 40) }, () => void 0);
+      // ★ v3.1.10：必须带 page，后台才能把结果绑到正确的页面/标签页，
+      //   否则 SPA 或 Service Worker 唤醒后可能写进别的标签页列表。
+      chrome.runtime.sendMessage({
+        cmd: 'addFound', items: items.slice(0, 40), page: location.href
+      }, () => void 0);
     } catch (e) { /* 扩展已重载 */ }
   }
 
@@ -261,7 +271,9 @@
       if (t.currentSrc) {
         try {
           chrome.runtime.sendMessage({
-            cmd: 'addFound', items: [{ url: t.currentSrc, type: 'video' }]
+            cmd: 'addFound',
+            page: location.href,
+            items: [{ url: t.currentSrc, type: t.tagName === 'AUDIO' ? 'audio' : 'video' }]
           }, () => { refreshCount(); });
         } catch (err) { /* ignore */ }
       }

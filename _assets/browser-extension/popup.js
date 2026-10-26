@@ -7,6 +7,9 @@ let currentTabItems = [];
 let currentTasks = [];
 let currentHistory = [];
 let activeTab = 'media';
+// ★ v3.1.10：轮询与手动刷新会并发，旧响应可能后到并覆盖新视图。
+//   每次刷新领一个序号，只有"最新一次请求"的响应才允许写入界面。
+let refreshSeq = 0;
 
 function fmtSize(n) {
   if (!n) return '';
@@ -258,8 +261,9 @@ function showHint(text, err) {
   }, 6000);
 }
 
-async function refreshMedia() {
+async function refreshMedia(seq) {
   const res = await send({ cmd: 'getItems', tabId: currentTab ? currentTab.id : null });
+  if (seq !== refreshSeq) return;          // 已有更新的刷新在途，丢弃本次旧数据
   if (res && res.ok) {
     currentTabItems = res.items || [];
     currentTasks = res.tasks || [];
@@ -267,30 +271,33 @@ async function refreshMedia() {
   }
 }
 
-async function refreshTasks() {
+async function refreshTasks(seq) {
   const res = await send({ cmd: 'getTasks' });
+  if (seq !== refreshSeq) return;
   if (res && res.ok) {
     currentTasks = res.tasks || [];
     renderStatus(res);
   }
 }
 
-async function refreshHistory() {
+async function refreshHistory(seq) {
   const res = await send({ cmd: 'getHistory', limit: 100 });
+  if (seq !== refreshSeq) return;
   if (res && res.ok) {
     currentHistory = res.items || [];
   }
 }
 
 async function refresh() {
+  const seq = ++refreshSeq;
   if (activeTab === 'media') {
-    await refreshMedia();
-    // 媒体页也顺带取一次活动任务，便于底部状态一致
+    await refreshMedia(seq);
   } else if (activeTab === 'tasks') {
-    await refreshTasks();
+    await refreshTasks(seq);
   } else {
-    await refreshHistory();
+    await refreshHistory(seq);
   }
+  if (seq !== refreshSeq) return;
   render();
 }
 
@@ -308,13 +315,21 @@ function setup() {
   $('btn-scan').addEventListener('click', async () => {
     $('status').textContent = '正在分析页面…';
     $('status').className = 'status';
-    const r = await send({ cmd: 'scanPage', url: currentTab.url });
+    // ★ v3.1.10：带上 tabId，让后台把结果写进"这个标签页"的列表；
+    //   不带时后台只能靠 sender 推断，扩展弹窗场景会落到 -1 而丢弃结果。
+    const r = await send({
+      cmd: 'scanPage', url: currentTab.url,
+      tabId: currentTab ? currentTab.id : null
+    });
+    const n = (r && r.items) ? r.items.length : 0;
     if (r && r.ok) {
-      $('hint').textContent = `分析完成，共发现 ${(r.items || []).length} 个媒体`;
+      $('hint').textContent = n
+        ? `分析完成，本页列表共 ${n} 个媒体`
+        : '分析完成，本页未发现媒体';
     } else {
       $('hint').textContent = '分析失败：' + ((r && r.error) || '未知');
     }
-    setTimeout(refresh, 400);
+    await refresh();
   });
   $('btn-clear').addEventListener('click', async () => {
     await send({ cmd: 'clear', tabId: currentTab ? currentTab.id : null });
@@ -332,8 +347,17 @@ function setup() {
       cmd: 'downloadBatch', items: payload,
       page: currentTab ? currentTab.url : ''
     });
-    $('hint').textContent = r && r.ok ? `已发送 ${items.length} 个任务`
-      : ('发送失败：' + ((r && r.error) || '请先启动下载器'));
+    // ★ v3.1.10：/batch 是逐项返回的，笼统按 r.ok 报"全部成功"会掩盖部分失败。
+    if (r && r.ok && Array.isArray(r.results)) {
+      const bad = r.results.filter((x) => !(x && x.ok));
+      $('hint').textContent = bad.length
+        ? `已发送 ${r.results.length - bad.length} 个，${bad.length} 个失败：` +
+          bad.slice(0, 2).map((x) => (x && x.error) || '未知').join('；')
+        : `已发送 ${r.results.length} 个任务`;
+    } else {
+      $('hint').textContent = r && r.ok ? `已发送 ${items.length} 个任务`
+        : ('发送失败：' + ((r && r.error) || '请先启动下载器'));
+    }
   });
   const sel = $('takeover');
   if (sel) {

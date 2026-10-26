@@ -82,27 +82,47 @@ class LocalAPI:
             server_version = "xiaozhu-dl/1.0"
 
             # --- 工具 ---
+            def _allowed_origin(self) -> str:
+                """返回严格校验后的 Origin；拒绝伪装扩展域名、端口和用户信息。"""
+                origin = (self.headers.get("Origin") or "").strip()
+                if not origin:
+                    return "*"
+                try:
+                    parsed = urllib.parse.urlsplit(origin)
+                    host = parsed.hostname or ""
+                    if (parsed.scheme in ("chrome-extension", "moz-extension",
+                                         "extension", "safari-web-extension")
+                            and parsed.netloc and not parsed.username and not parsed.password
+                            and parsed.path in ("", "/") and not parsed.query
+                            and not parsed.fragment and parsed.port is None):
+                        return origin
+                    if (parsed.scheme in ("http", "https")
+                            and host in ("127.0.0.1", "localhost", "::1")
+                            and not parsed.username and not parsed.password
+                            and parsed.path in ("", "/") and not parsed.query
+                            and not parsed.fragment):
+                        return origin
+                except ValueError:
+                    pass
+                return ""
+
             def _origin_ok(self) -> bool:
-                o = (self.headers.get("Origin") or "").strip()
-                if not o:
-                    return True  # 本地进程（curl/脚本）无 Origin
-                if o.startswith(("chrome-extension://", "moz-extension://",
-                                 "extension://", "safari-web-extension://")):
-                    return True
-                host = urllib.parse.urlsplit(o).hostname or ""
-                return host in ("127.0.0.1", "localhost", "::1")
+                return bool(self._allowed_origin())
 
             def _is_extension(self) -> bool:
-                o = (self.headers.get("Origin") or "").strip()
-                return o.startswith(("chrome-extension://", "moz-extension://",
-                                     "extension://", "safari-web-extension://"))
+                origin = self._allowed_origin()
+                return origin.startswith(("chrome-extension://", "moz-extension://",
+                                         "extension://", "safari-web-extension://"))
 
             def _json(self, obj, code: int = 200):
                 body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Access-Control-Allow-Origin", "*")
+                origin = self._allowed_origin()
+                if origin:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type, X-XZD-Token")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.end_headers()
@@ -119,23 +139,41 @@ class LocalAPI:
                 return bool(t) and hmac.compare_digest(t, api.token)
 
             def _body(self) -> dict:
+                """只接受有界 JSON 对象；坏请求由 HTTP 400 表示，不打断连接。"""
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
-                    n = 0
-                if n <= 0 or n > MAX_BODY:
-                    return {}
+                    raise ValueError("Content-Length 无效")
+                if n <= 0:
+                    raise ValueError("请求体不能为空")
+                if n > MAX_BODY:
+                    raise ValueError("请求体超过 2MB 限制")
                 try:
-                    return json.loads(self.rfile.read(n).decode("utf-8", "replace")) or {}
-                except Exception:
-                    return {}
+                    raw = self.rfile.read(n)
+                    value = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("请求体必须是有效 JSON") from exc
+                if not isinstance(value, dict):
+                    raise ValueError("JSON 根必须是对象")
+                return value
 
             def log_message(self, *a):  # 静音，避免污染控制台
                 return
 
             # --- 路由 ---
             def do_OPTIONS(self):
+                # 预检不读取或创建任务，因此无需令牌；Origin 仍需遵守白名单。
+                if not self._origin_ok():
+                    return self._json({"ok": False, "error": "origin 不允许"}, 403)
                 self._json({"ok": True})
+
+            def handle_one_request(self):
+                # 浏览器探测端口或主动取消请求时，空连接/重置是正常噪声，
+                # 不应让 BaseHTTPRequestHandler 打出整段看似崩溃的堆栈。
+                try:
+                    super().handle_one_request()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    self.close_connection = True
 
             def do_GET(self):
                 if not self._origin_ok():
@@ -177,7 +215,10 @@ class LocalAPI:
                     if not self._token_ok():
                         return self._json({"ok": False, "error": "令牌无效"}, 401)
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-                    limit = int((q.get("limit") or ["100"])[0])
+                    try:
+                        limit = max(1, min(500, int((q.get("limit") or ["100"])[0])))
+                    except (TypeError, ValueError):
+                        return self._json({"ok": False, "error": "limit 必须是 1-500 的整数"}, 400)
                     items = api.mgr.history(limit=limit)
                     # 补上 out_dir / exists，扩展点「打开/目录」需要且能提前提示失效
                     out = []
@@ -247,10 +288,18 @@ class LocalAPI:
                 if not self._token_ok():
                     return self._json({"ok": False, "error": "令牌无效"}, 401)
                 path = urllib.parse.urlsplit(self.path).path
-                body = self._body()
+                try:
+                    body = self._body()
+                except ValueError as exc:
+                    return self._json({"ok": False, "error": str(exc)}, 400)
 
-                def add_one(item: dict, page: str = "") -> dict:
-                    url = (item.get("url") or "").strip()
+                def add_one(item, page: str = "") -> dict:
+                    if not isinstance(item, dict):
+                        return {"ok": False, "error": "批次元素必须是对象", "item": item}
+                    url = item.get("url") or ""
+                    if not isinstance(url, str):
+                        return {"ok": False, "error": "url 必须是字符串", "url": str(url)}
+                    url = url.strip()
                     # v3.0.0: 接受 magnet: 与 .torrent（本地路径或 http 链接）
                     u_lower = url.lower()
                     is_bt = u_lower.startswith("magnet:") or u_lower.endswith(".torrent")
@@ -260,21 +309,25 @@ class LocalAPI:
                     if is_bt and not (u_lower.startswith("magnet:") or url.startswith(("http://","https://"))):
                         if not os.path.exists(url):
                             return {"ok": False, "error": "种子文件不存在", "url": url}
-                    referer = item.get("referer") or page or ""
+                    for key in ("referer", "cookie", "out_dir", "filename", "kind"):
+                        if not isinstance(item.get(key, ""), str):
+                            return {"ok": False, "error": f"{key} 必须是字符串", "url": url}
                     headers = item.get("headers") or {}
-                    if not isinstance(headers, dict):
-                        headers = {}
+                    if not isinstance(headers, dict) or not all(
+                            isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+                        return {"ok": False, "error": "headers 必须是字符串键值对象", "url": url}
+                    if not isinstance(page, str):
+                        return {"ok": False, "error": "page 必须是字符串", "url": url}
+                    referer = item.get("referer") or page or ""
+                    conns = item.get("conns")
+                    if conns is not None and (isinstance(conns, bool) or not isinstance(conns, int)):
+                        return {"ok": False, "error": "conns 必须是整数", "url": url}
                     try:
                         t = api.mgr.add_task(
-                            url,
-                            out_dir=(item.get("out_dir") or "").strip() or None,
-                            filename=(item.get("filename") or "").strip(),
-                            referer=referer,
-                            cookie=(item.get("cookie") or ""),
-                            headers=headers,
-                            kind=(item.get("kind") or "auto"),
-                            conns=item.get("conns"),
-                        )
+                            url, out_dir=item.get("out_dir") or None,
+                            filename=item.get("filename") or "",
+                            referer=referer, cookie=item.get("cookie") or "",
+                            headers=headers, kind=item.get("kind") or "auto", conns=conns)
                         return {"ok": True, "tid": t.tid, "filename": t.filename,
                                 "kind": t.kind, "url": url}
                     except Exception as e:  # noqa
@@ -285,23 +338,41 @@ class LocalAPI:
                     return self._json(r, 200 if r.get("ok") else 400)
                 if path == "/batch":
                     page = body.get("page") or ""
-                    items = body.get("items") or []
+                    items = body.get("items")
+                    if not isinstance(page, str):
+                        return self._json({"ok": False, "error": "page 必须是字符串"}, 400)
                     if not isinstance(items, list):
                         return self._json({"ok": False, "error": "items 必须是数组"}, 400)
-                    results = [add_one(it, page) for it in items[:100]]
+                    if not items:
+                        return self._json({"ok": False, "error": "批次不能为空"}, 400)
+                    if len(items) > 100:
+                        return self._json({"ok": False, "error": "单批次最多 100 项，请拆分提交"}, 400)
+                    results = [add_one(it, page) for it in items]
                     api.mgr.add_sniff_items(page, [{"url": it.get("url", ""),
                                                     "filename": it.get("filename", "")}
-                                                   for it in items[:100] if it.get("url")])
+                                                   for it in items if isinstance(it, dict) and it.get("url")])
                     return self._json({"ok": True, "results": results})
                 if path == "/sniff":
-                    items = body.get("items") or []
+                    items = body.get("items")
                     page = body.get("page") or ""
+                    if not isinstance(page, str) or not isinstance(items, list):
+                        return self._json({"ok": False, "error": "page 必须是字符串，items 必须是数组"}, 400)
+                    if not items:
+                        return self._json({"ok": False, "error": "嗅探批次不能为空"}, 400)
+                    if len(items) > 100:
+                        return self._json({"ok": False, "error": "单批次最多 100 项，请拆分提交"}, 400)
+                    if any(not isinstance(it, dict) for it in items):
+                        return self._json({"ok": False, "error": "嗅探元素必须是对象"}, 400)
+                    if any(not isinstance(it.get("url", ""), str) or
+                           not isinstance(it.get("filename", ""), str) for it in items):
+                        return self._json({"ok": False, "error": "url/filename 必须是字符串"}, 400)
                     n = api.mgr.add_sniff_items(page, items)
                     return self._json({"ok": True, "added": n})
                 if path == "/open":
-                    # 扩展请求：打开已完成任务的文件或所在目录
                     tid = body.get("tid") or ""
-                    mode = body.get("mode") or "file"   # file | folder
+                    mode = body.get("mode") or "file"
+                    if not isinstance(tid, str) or mode not in ("file", "folder"):
+                        return self._json({"ok": False, "error": "tid/mode 参数无效"}, 400)
                     target = ""
                     task = api.mgr.get(tid)
                     if task:
@@ -325,14 +396,15 @@ class LocalAPI:
                         return self._json({"ok": False,
                                            "error": "找不到该任务的下载文件记录"}, 404)
                     exists = os.path.exists(target)
-                    folder = os.path.dirname(target)
+                    is_directory = os.path.isdir(target)
+                    folder = target if is_directory else os.path.dirname(target)
                     try:
                         if mode == "folder":
                             # 文件已不在但目录还在 → 仍然打开目录（比报错有用）
                             if exists:
-                                subprocess.Popen(
-                                    ["explorer", "/select,", os.path.normpath(target)],
-                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                                cmd = (["explorer", os.path.normpath(target)] if is_directory else
+                                       ["explorer", "/select,", os.path.normpath(target)])
+                                subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW)
                                 return self._json({"ok": True, "opened": folder})
                             if os.path.isdir(folder):
                                 subprocess.Popen(

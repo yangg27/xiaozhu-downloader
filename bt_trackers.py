@@ -361,29 +361,52 @@ def probe_tracker(t: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def filter_alive(trackers: list[str], max_workers: int = 32,
+def filter_alive(trackers: list[str], max_workers: int = 16,
                  timeout: float = 3.0) -> tuple[list[str], list[tuple[str, bool]]]:
     """
     多线程探测 tracker 可用性。返回 (alive_list, full_results)。
     注意：这是端口层可达性，不等价于 tracker 真能 announce，但可剔除大量无效节点。
+
+    ★ v3.1.10 性能修复（实测抓到堆栈）：
+      旧实现是"**每个 tracker 起一个新线程**"，配合 32 并发上限，会在
+      启动瞬间创建/销毁上百个 Thread 对象，每次 t.start() 都要抢 CPython
+      内部线程状态锁。此时下载工作线程也在成批 start() —— 两者相互争抢，
+      实测把 snapshots() 拖到挂起 6 秒以上（K8 死锁回归用例），界面与
+      /status 同时卡住，用户看到的就是"下载中界面不刷新"。
+      改为**固定大小线程池 + 队列**：线程只创建 max_workers 个，探测任务
+      在池内复用，t.start() 次数从 O(节点数) 降到 O(并发数)。
     """
     results: list[tuple[str, bool]] = []
     lock = threading.Lock()
+    if not trackers:
+        return [], []
 
-    def check(t: str):
-        ok = probe_tracker(t, timeout=timeout)
-        with lock:
-            results.append((t, ok))
-
-    threads = []
+    # 用 Queue 分发任务：worker 数量固定，绝不为每个节点单独建线程。
+    import queue as _queue
+    q: "_queue.Queue" = _queue.Queue()
     for t in trackers:
-        while len(threads) >= max_workers:
-            threads[0].join(timeout=0.1)
-            threads = [th for th in threads if th.is_alive()]
-        th = threading.Thread(target=check, args=(t,), daemon=True)
+        q.put(t)
+    for _ in range(min(max_workers, len(trackers))):
+        q.put(None)          # 结束哨兵
+
+    def worker():
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            try:
+                ok = probe_tracker(item, timeout=timeout)
+            except Exception:
+                ok = False
+            with lock:
+                results.append((item, ok))
+
+    pool = [threading.Thread(target=worker, daemon=True,
+                             name="xzd-tracker-probe")
+            for _ in range(min(max_workers, len(trackers)))]
+    for th in pool:
         th.start()
-        threads.append(th)
-    for th in threads:
+    for th in pool:
         th.join()
 
     alive = [t for t, ok in results if ok]
@@ -399,11 +422,15 @@ def get_trackers(*, prefer_cache: bool = True,
                  custom_source: str = "",
                  probe_alive: bool = False,
                  probe_timeout: float = 3.0,
-                 probe_workers: int = 32) -> tuple[list[str], str]:
+                 probe_workers: int = 8) -> tuple[list[str], str]:
     """获取 tracker 列表。
     返回 (trackers, source_desc)。
     策略：缓存（新鲜）→ 网络拉取 → 缓存（陈旧）→ 内置兜底
     如果 probe_alive=True，则对结果进行端口层可达性探测，只保留存活的 tracker。
+
+    ★ v3.1.10：探测并发默认从 32 降到 8 —— 这些探测线程与下载工作线程
+      共享 GIL，32 路并发只探测几十个 tracker 的端口，收益极小，
+      却会在下载高峰抢线程状态锁（实测造成 snapshots() 秒级卡顿）。
     """
     cached = load_cached()
     meta = meta_info()

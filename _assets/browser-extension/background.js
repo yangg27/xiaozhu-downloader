@@ -29,7 +29,8 @@ const MEDIA_MIME = [
 ];
 
 const state = {
-  byTab: {},            // tabId -> { items: [], page: '' }
+  byTab: {},            // tabId -> { items: [], page: '' }，仅存元数据，不保存浏览内容
+  pageUrls: {},         // tabId -> 顶层页面地址，供 Service Worker 唤醒后恢复
   token: '',
   port: DEFAULT_PORT,
   connected: false,
@@ -41,8 +42,13 @@ const state = {
 // ------------------------- 持久化 -------------------------
 async function loadState() {
   try {
-    const s = await chrome.storage.local.get(['sniff', 'token', 'port', 'takeover']);
+    const s = await chrome.storage.local.get(['sniff', 'pageUrls', 'token', 'port', 'takeover']);
     state.byTab = s.sniff || {};
+    state.pageUrls = s.pageUrls || {};
+    // 兼容旧版存储，并保证每个标签页的页面地址可恢复。
+    for (const [tabId, store] of Object.entries(state.byTab)) {
+      if (store && store.page) state.pageUrls[tabId] = store.page;
+    }
     state.token = s.token || '';
     state.port = s.port || DEFAULT_PORT;
     state.takeover = s.takeover || 'all';
@@ -51,7 +57,7 @@ async function loadState() {
 function saveState() {
   try {
     chrome.storage.local.set({
-      sniff: state.byTab, token: state.token,
+      sniff: state.byTab, pageUrls: state.pageUrls, token: state.token,
       port: state.port, takeover: state.takeover
     });
   } catch (e) { /* ignore */ }
@@ -59,7 +65,53 @@ function saveState() {
 
 function tabStore(tabId) {
   if (!state.byTab[tabId]) state.byTab[tabId] = { items: [], page: '' };
-  return state.byTab[tabId];
+  const store = state.byTab[tabId];
+  if (!Array.isArray(store.items)) store.items = [];
+  if (!store.page && state.pageUrls[tabId]) store.page = state.pageUrls[tabId];
+  return store;
+}
+
+function bindPage(tabId, page, reset = false) {
+  if (tabId == null || tabId < 0 || !/^https?:/i.test(page || '')) return null;
+  const store = tabStore(tabId);
+  const old = store.page || state.pageUrls[tabId] || '';
+  if (reset || (old && old !== page)) store.items = [];
+  store.page = page;
+  state.pageUrls[tabId] = page;
+  updateBadge(tabId);
+  return old !== page ? null : store;
+}
+
+function senderPage(sender) {
+  return sender && sender.tab && /^https?:/i.test(sender.tab.url || '')
+    ? sender.tab.url : '';
+}
+
+function matchesPage(tabId, page) {
+  if (!page) return true;
+  const store = tabStore(tabId);
+  const canonical = (u) => { try { const x = new URL(u); x.hash = ''; return x.href; } catch (e) { return u; } };
+  return canonical(store.page || state.pageUrls[tabId] || '') === canonical(page);
+}
+
+async function scanAndRecord(tabId, url) {
+  if (tabId == null || tabId < 0 || !/^https?:/i.test(url || '')) {
+    return { ok: false, error: '无法确定要分析的当前页面' };
+  }
+  const r = await sendToDownloader({
+    path: '/scan?url=' + encodeURIComponent(url) + '&token=' + state.token,
+    method: 'GET'
+  });
+  if (r && r.ok && matchesPage(tabId, url)) {
+    bindPage(tabId, url);
+    for (const it of (r.items || []).slice(0, 60)) {
+      record(tabId, it.url, {
+        type: it.type, filename: it.filename, referer: url, from: 'scan', page: url
+      });
+    }
+    r.added = tabStore(tabId).items.length;
+  }
+  return r;
 }
 
 // ------------------------- 嗅探判定 -------------------------
@@ -116,18 +168,23 @@ function sizeOf(headers) {
 
 /** 记录一条嗅探结果 */
 function record(tabId, url, opts = {}) {
-  if (!tabId || tabId < 0) return false;
+  if (tabId == null || tabId < 0 || !/^https?:/i.test(url || '')) return false;
+  if (opts.page && !matchesPage(tabId, opts.page)) return false;
   const store = tabStore(tabId);
   if (store.items.some((it) => it.url === url)) return false;
-  const info = isMediaUrl(url) || { type: opts.type || 'media', ext: '' };
+  const detected = isMediaUrl(url);
+  const info = detected || { type: opts.type || 'media', ext: getExt(url).ext };
+  const page = opts.page || opts.referer || store.page || state.pageUrls[tabId] || '';
   const item = {
     url,
-    type: info.type,
+    // URL 扩展名是硬证据：<audio src="x.mp3"> 曾被内容脚本标成 video，
+    // 若这里仍优先 opts.type，就会把音频误显示成视频。
+    type: detected ? detected.type : (opts.type || 'media'),
     ext: info.ext || '',
     filename: opts.filename || filenameOf(url),
     size: opts.size || null,
-    page: store.page || '',
-    referer: opts.referer || store.page || '',
+    page,
+    referer: opts.referer || page,
     from: opts.from || 'network',
     frameId: opts.frameId != null ? opts.frameId : null,
     fromFrame: !!opts.fromFrame,
@@ -165,12 +222,15 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (!hit && !mimeHit) return;
 
     const store = tabStore(details.tabId);
-    if (!store.page) store.page = details.initiator || '';
+    if (!store.page) bindPage(details.tabId, details.documentUrl || details.initiator || '');
+    // Chrome 的 initiator 通常只有 origin，不能覆盖已知的完整页面地址。
+    const page = store.page || details.documentUrl || details.initiator || '';
     record(details.tabId, url, {
       type: hit ? hit.type : (ctype.startsWith('video') ? 'video'
             : ctype.startsWith('audio') ? 'audio' : 'media'),
       size: sizeOf(details.responseHeaders),
-      referer: details.initiator || store.page,
+      page,
+      referer: page,
       from: hit ? 'network' : 'mime',
       frameId: details.frameId,
       fromFrame: details.frameId !== 0
@@ -183,18 +243,18 @@ chrome.webRequest.onHeadersReceived.addListener(
 // ------------------------- 标签页生命周期 -------------------------
 chrome.tabs.onRemoved.addListener((tabId) => {
   delete state.byTab[tabId];
+  delete state.pageUrls[tabId];
   saveState();
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'loading' && changeInfo.url) {
-    // 换了地址（含 SPA 跳转）→ 清空该标签页旧结果
-    state.byTab[tabId] = { items: [], page: changeInfo.url };
-    updateBadge(tabId);
+  const page = changeInfo.url || (tab && tab.url) || '';
+  if (changeInfo.status === 'loading' || changeInfo.url) {
+    // 地址变化（含 SPA）清空旧页面结果；普通 loading 不丢掉当前页媒体。
+    bindPage(tabId, page, !!changeInfo.url);
     saveState();
-  } else if (changeInfo.status === 'complete' && tab && tab.url) {
-    const store = tabStore(tabId);
-    store.page = tab.url;
+  } else if (changeInfo.status === 'complete') {
+    bindPage(tabId, page);
     saveState();
   }
 });
@@ -280,12 +340,12 @@ async function sendToDownloader(payload) {
   if (!ok) return { ok: false, error: '未检测到小助下载器，请先启动它' };
   try {
     const r = await xzdFetch(`http://127.0.0.1:${state.port}${payload.path}`, {
-      method: 'POST',
+      method: payload.method || 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        ...(payload.method === 'GET' ? {} : { 'Content-Type': 'application/json' }),
         'X-XZD-Token': state.token
       },
-      body: JSON.stringify(payload.body)
+      ...(payload.method === 'GET' ? {} : { body: JSON.stringify(payload.body) })
     });
     const j = await r.json().catch(() => ({}));
     if (r.status === 401) {           // 令牌失效 → 重新握手一次
@@ -306,7 +366,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'getItems': {
         const tabId = msg.tabId != null ? msg.tabId
           : (sender.tab ? sender.tab.id : -1);
-        const store = state.byTab[tabId] || { items: [], page: '' };
+        const store = tabStore(tabId);
+        if (msg.page) bindPage(tabId, msg.page);
         const ok = await ensureToken();
         reply({ ok: true, items: store.items, page: store.page,
                 connected: ok, port: state.port, tasks: state.tasks });
@@ -342,12 +403,43 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       }
       case 'addFound': {   // 内容脚本发现的媒体（js 里拼接的地址等）
         const tabId = sender.tab ? sender.tab.id : msg.tabId;
+        // ★ v3.1.10 修复（真实 Chrome 扩展复测 EXT-03 失败）：
+        //   子帧（iframe）上报时 msg.page 是**子帧自己的 URL**，与父页面不同。
+        //   旧代码无条件 bindPage(tabId, page)，而 bindPage 在 page 变化时会
+        //   store.items = [] 清空整个标签页列表 —— 于是：
+        //     父页面 DOM 上报 → 清空 → 写入父页面 3 项
+        //     子帧 DOM 上报   → 又清空 → 写入子帧音频
+        //     父页面再上报    → 再清空 → 子帧音频丢失
+        //   实测证据（run-v310-a）：fixture 页含 <iframe src=".../frame">，
+        //   帧内 <audio src="frame-audio.mp3">；popup 最终只列出
+        //   network.mp4 / playlist.m3u8 / dom.mp4，frame-audio.mp3 永远不出现
+        //   （夹具日志显示 /frame 确实被加载过）。子帧资源本就属于当前标签页，
+        //   不应触发页面切换语义。
+        const isSubFrame = sender && sender.frameId != null && sender.frameId !== 0;
+        // 子帧：沿用既有页面绑定，绝不改写 page、绝不清空列表。
+        // 主帧：维持原有页面隔离语义（换页即清空）。
+        if (!isSubFrame) {
+          const page = msg.page || senderPage(sender);
+          if (tabId == null || tabId < 0 || !page) {
+            reply({ ok: false, error: '无法识别媒体来源页面' });
+            break;
+          }
+          bindPage(tabId, page);
+        } else if (tabId == null || tabId < 0) {
+          reply({ ok: false, error: '无法识别媒体来源页面' });
+          break;
+        }
         const store = tabStore(tabId);
+        // 归属页面：子帧用当前标签页已绑定的页面作 referer，
+        // 避免把 iframe 地址写成下载 Referer（会导致防盗链站 403）。
+        const ownerPage = store.page || state.pageUrls[tabId] || senderPage(sender) || '';
         let n = 0;
-        (msg.items || []).forEach((it) => {
+        (Array.isArray(msg.items) ? msg.items : []).slice(0, 60).forEach((it) => {
           if (record(tabId, it.url, {
             type: it.type,
             filename: it.filename,
+            page: ownerPage,
+            referer: ownerPage,
             from: 'dom',
             frameId: sender.frameId != null ? sender.frameId : null,
             fromFrame: !!it.fromFrame
@@ -379,11 +471,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         reply(r);
         break;
       }
-      case 'scanPage': {   // 让下载器代为分析网页
-        const r = await sendToDownloader({
-          path: '/scan?url=' + encodeURIComponent(msg.url) + '&token=' + state.token,
-          body: null
-        });
+      case 'scanPage': {   // 让下载器代为分析网页 → 结果必须进入当前标签页嗅探列表
+        const tabId = msg.tabId != null ? msg.tabId
+          : (sender.tab ? sender.tab.id : -1);
+        // ★ v3.1.10：此前只把响应回给调用方，没有写进本标签页列表，
+        //   于是"分析完成，共 N 个媒体"之后列表仍然是空的（用户以为失败）。
+        const r = await scanAndRecord(tabId, msg.url || '');
         reply(r);
         break;
       }
@@ -479,6 +572,28 @@ function shouldTakeover(url, mime) {
 
 let takeoverGuard = new Set();   // 防重入：同一下载已被处理
 
+/** 接管所需的上下文：页面地址与文件名。
+ *
+ *  ★ v3.1.10 修复两个真实缺陷（真实 Chrome 156 复现）：
+ *    1) downloads.onCreated 早期 item.filename 可能为空 → 请求里 filename:''
+ *       下载器只能从 URL 猜名字。这里用 filenameOf() 兜底。
+ *    2) item.tabId 可能为 -1（无来源标签页）→ referer 为空，
+ *       下载器发出的 Range 请求缺少 Referer，防盗链站点会 403。
+ *       这里依次回退：标签页已知页面 → item.referrer。
+ */
+function takeoverContext(item) {
+  const tabId = item.tabId;
+  let page = '';
+  if (tabId != null && tabId >= 0) {
+    page = (state.byTab[tabId] && state.byTab[tabId].page) || state.pageUrls[tabId] || '';
+  }
+  if (!page && item.referrer && /^https?:/i.test(item.referrer)) page = item.referrer;
+  if (!page && item.documentUrl && /^https?:/i.test(item.documentUrl)) page = item.documentUrl;
+  const raw = item.filename || '';
+  const filename = raw ? raw.split(/[\\/]/).pop() : filenameOf(item.finalUrl || item.url);
+  return { tabId, page, filename };
+}
+
 chrome.downloads.onCreated.addListener(async (item) => {
   const url = item.finalUrl || item.url;
   if (!shouldTakeover(url, item.mime || '')) return;
@@ -487,35 +602,71 @@ chrome.downloads.onCreated.addListener(async (item) => {
   takeoverGuard.add(key);
   setTimeout(() => takeoverGuard.delete(key), 8000);
 
-  // 先取消浏览器自己的下载
-  try {
-    await chrome.downloads.cancel(item.id);
-    await chrome.downloads.erase({ id: item.id });
-  } catch (e) { /* 可能已完成，忽略 */ }
+  const ctx = takeoverContext(item);
 
-  // 转交下载器
-  const filename = item.filename ? item.filename.split(/[\\/]/).pop() : '';
-  const tabId = item.tabId;
-  const store = tabId >= 0 ? state.byTab[tabId] : null;
-  const referer = (store && store.page) || '';
-
+  // ★ v3.1.10 事务修复：先让下载器确认接收，成功后才取消浏览器下载。
+  //   旧顺序是"先 cancel + erase，再转交"——一旦转交失败（下载器未启动、
+  //   接口报错、唤醒超时），这次下载就凭空消失了，用户两头都拿不到文件。
   const r = await ensureSend({
     path: '/add',
     body: {
       url: url,
-      filename: filename || '',
-      referer: referer,
+      filename: ctx.filename || '',
+      referer: ctx.page || '',
       cookie: item.cookie || '',
       kind: 'auto'
     }
   }, url);
 
-  // 记录到嗅探列表，便于用户在面板看到
-  if (tabId >= 0) {
-    record(tabId, url, { filename: filename, referer: referer, from: 'takeover' });
+  if (r && r.ok) {
+    // 下载器已受理 → 此时才取消浏览器自己的下载，避免重复下载与磁盘占用
+    //
+    // ★ v3.1.10 修复（真实 Chrome 复测 EXT-09 失败定位，真实产品缺陷）：
+    //   `cancel` + `erase` 只清**下载记录**，**不删磁盘上已落盘的文件**。
+    //   实测证据（run-v310-b，EXT-09）：
+    //     chrome.downloads.search({}) 过滤 takeover.zip → 0 条 ✓（记录已抹）
+    //     但 runtime.browser_downloads 目录里 takeover.zip 仍在 ✗（文件没删）
+    //   后果：一段"已经交给下载器"的下载，磁盘上还留着一份谁也不会再用的
+    //   重复文件 —— 与"接管"语义矛盾，用户白占空间。
+    //
+    //   为什么之前没删成：小文件（夹具 64KB）几乎瞬间下完。而这里的顺序是
+    //   `await ensureSend(...)`（一次 HTTP 往返）**之后**才 cancel —— 等回来时
+    //   下载已经是 complete，cancel 对已完成的下载无效，文件已经落盘。
+    //
+    //   修法（顺序很关键，写反就无效）：
+    //     ① 先取回 item 状态（此时记录还在，search 查得到，exists 才有值）
+    //     ② 若已 complete 且 exists → removeFile 删磁盘文件
+    //     ③ 最后才 erase 抹记录（抹完就再也查不到，所以必须放最后）
+    //   removeFile 在权限或时序不允许时静默降级：最坏结果是"记录已清、
+    //   多留一份文件"，不会中断接管主流程，也不会让用户丢文件。
+    try {
+      const before = await new Promise((resolve) => {
+        chrome.downloads.search({ id: item.id }, (ds) => resolve((ds && ds[0]) || null));
+      });
+      if (before && before.exists) {
+        await new Promise((resolve) => {
+          try {
+            chrome.downloads.removeFile(item.id, () => {
+              void chrome.runtime.lastError;   // 不允许删除时静默降级
+              resolve();
+            });
+          } catch (e) { resolve(); }
+        });
+      }
+    } catch (e) { /* 删文件失败不阻塞接管 */ }
+    try {
+      await chrome.downloads.cancel(item.id);
+      await chrome.downloads.erase({ id: item.id });
+    } catch (e) { /* 可能已完成，忽略 */ }
   }
-  notifyUser(r && r.ok ? '已转交下载' : '转交失败',
-             r && r.ok ? (filename || url) : ((r && r.error) || '请确认下载器正在运行'));
+  // 转交失败则保留浏览器原始下载（用户不丢文件），提示里说明原因
+
+  // 记录到嗅探列表，便于用户在面板看到
+  if (ctx.tabId >= 0) {
+    record(ctx.tabId, url, { filename: ctx.filename, referer: ctx.page, from: 'takeover' });
+  }
+  notifyUser(r && r.ok ? '已转交下载' : '转交失败（已保留浏览器下载）',
+             r && r.ok ? (ctx.filename || url) : ((r && r.error) || '请确认下载器正在运行'));
 });
 
 // ------------------------- 自动唤起下载器 -------------------------
@@ -647,14 +798,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       body: { url: info.srcUrl, referer: tab ? tab.url : '', kind: 'auto' }
     }, info.srcUrl);
   } else if (info.menuItemId === 'xzd-scan') {
-    const r = await sendToDownloader({
-      path: '/scan?url=' + encodeURIComponent(tab.url) + '&token=' + state.token,
-      body: null
-    });
-    if (r && r.ok && r.items && r.items.length && tab) {
-      for (const it of r.items.slice(0, 30)) {
-        record(tab.id, it.url, { type: it.type, filename: it.filename, from: 'scan' });
-      }
+    if (tab && tab.id >= 0) {
+      const r = await scanAndRecord(tab.id, tab.url || '');
+      notifyUser(r && r.ok ? '页面分析完成' : '分析失败',
+                 r && r.ok ? `发现 ${(r.items || []).length} 个媒体`
+                           : ((r && r.error) || '请确认下载器正在运行'));
     }
   } else if (info.menuItemId === 'xzd-history-open' || info.menuItemId === 'xzd-history-folder') {
     await fetchHistory(1);
