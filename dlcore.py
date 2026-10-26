@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 核心引擎  dlcore.py   v3.1.4
+小助下载器 · 核心引擎  dlcore.py   v3.1.10
 =========================================
 零依赖（纯 Python 标准库）下载引擎，提供与 IDM 同款的核心能力：
 
@@ -49,10 +49,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.9"
+ENGINE_VERSION = "3.1.10"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -662,9 +663,49 @@ class HttpHelper:
             h.update(extra)
         return h
 
+    @staticmethod
+    def normalize_url(url: str) -> str:
+        """把 URL 里**不允许出现在 HTTP request-target 中的字符**编码掉。
+
+        ★ v3.1.10 修复（探针 probe-url-space.py 实证，真实产品缺陷）：
+          网页里 `<a href="/video only.mp4">` 是完全合法的 HTML，浏览器
+          会自动把空格编码为 %20 再发请求；但本软件的网页分析把提取到的
+          URL **原样**交给 Manager，urlopen 直接拒绝：
+            InvalidURL: URL can't contain control characters.
+                        '/video only.mp4' (found at least ' ')
+          实测现场（GUI 第十一轮「网页视频下载与合并」90s 超时）：
+            url='http://127.0.0.1:6621/video only.mp4'
+            state='error'  err="InvalidURL: URL can't contain control characters..."
+          用户可见后果：**任何带空格的媒体链接都无法下载**（网页提取或手动
+          粘贴均如此），而带空格的媒体文件名在真实站点非常常见。
+
+        ⚠ 只编码 path / query / fragment，**绝不能碰 scheme 与 netloc** ——
+          对整串调 quote() 会把 `://` 也编掉，破坏 URL 结构。
+        ⚠ 已是 %20 的不能二次编码成 %2520 → 用 `safe` 保留 `%`。
+        """
+        if not url or not isinstance(url, str):
+            return url
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except Exception:
+            return url
+        if not parts.scheme:
+            return url          # 相对/异常 URL：交给上层原有逻辑处理
+        # safe 里保留所有 URI 保留字符 + '%'（避免把已编码的二次编码）
+        _SAFE = "%:/?#[]@!$&'()*+,;=~-._"
+        path = urllib.parse.quote(parts.path, safe=_SAFE)
+        query = urllib.parse.quote(parts.query, safe=_SAFE)
+        fragment = urllib.parse.quote(parts.fragment, safe=_SAFE)
+        if (path, query, fragment) == (parts.path, parts.query, parts.fragment):
+            return url          # 无需改动（绝大多数 URL 走这条，零开销）
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, path, query, fragment))
+
     def open(self, url: str, extra: dict | None = None, method: str = "GET",
              timeout: int = SOCKET_TIMEOUT):
-        req = urllib.request.Request(url, headers=self.headers(extra), method=method)
+        # ★ v3.1.10：空格等非法字符先编码（见 normalize_url 说明）
+        req = urllib.request.Request(self.normalize_url(url),
+                                     headers=self.headers(extra), method=method)
         return self._opener.open(req, timeout=timeout)
 
     # ------------------------------------------------------------------
@@ -688,6 +729,9 @@ class HttpHelper:
 
         返回 None 表示该 URL 不适合走连接池（交由 urllib 处理）。
         """
+        # ★ v3.1.10：先规范化（空格等非法字符编码），否则 http.client
+        #   会带着含空格的 request-target 发请求而被服务端拒绝。
+        url = self.normalize_url(url)
         try:
             u = urllib.parse.urlsplit(url)
         except Exception:
@@ -703,6 +747,9 @@ class HttpHelper:
         path = u.path or "/"
         if u.query:
             path += "?" + u.query
+        # RFC 3986：fragment 只用于客户端定位，不得进入 HTTP request-target。
+        if u.fragment:
+            path = urllib.parse.urldefrag(path)[0]
         if self._proxy or self._ctx_override is not None:
             return None          # 代理 / 自定义 SSL 上下文：交给 urllib 更稳妥
         return (scheme, host, port, path)
@@ -810,9 +857,11 @@ class HttpHelper:
         if key is None:
             return None, None, None
         try:
-            path = urllib.parse.urlsplit(url).path or "/"
-            if urllib.parse.urlsplit(url).query:
-                path += "?" + urllib.parse.urlsplit(url).query
+            # ★ v3.1.10：同 _url_key —— 先规范化再取 path
+            parts = urllib.parse.urlsplit(self.normalize_url(url))
+            path = parts.path or "/"
+            if parts.query:
+                path += "?" + parts.query
         except Exception:
             return None, None, None
         pool = self._tl_pool()
@@ -873,52 +922,61 @@ class HttpHelper:
 # --------------------------------------------------------------------------
 
 class RateLimiter:
-    # 单块单次消费至少 READ_SIZE（256KB），令牌桶上限不得低于该值，
-    # 否则 consume(n) 永远无法满足，出现死循环（限速 1~127 KB/s 时卡死）。
-    _MIN_BURST = READ_SIZE
+    """允许任意读取块大小的平滑令牌桶，容量为一秒流量。"""
 
     def __init__(self, rate_bps: int = 0):
         self.rate = max(0, int(rate_bps or 0))
-        # 初始令牌直接装满到 burst，避免低速时第一次 consume 要等几十秒。
-        self._tokens = float(max(self._MIN_BURST, self.rate))
-        self._ts = now()
+        # v3.1.10: 不预支一秒甚至数秒流量。旧版初始装满 burst，
+        # 低限速任务会瞬间完成，界面显示 64KB/s 实际却跑满带宽。
+        self._tokens = 0.0
+        self._ts = time.monotonic()
         self._lock = threading.Lock()
 
     def set_rate(self, rate_bps: int):
         with self._lock:
+            t = time.monotonic()
+            if self.rate > 0:
+                self._tokens = min(float(self.rate),
+                                   self._tokens + max(0.0, t - self._ts) * self.rate)
+            else:
+                self._tokens = 0.0
             self.rate = max(0, int(rate_bps or 0))
-            burst = max(self._MIN_BURST, self.rate)
-            self._tokens = float(min(burst, self._tokens))
+            self._tokens = min(float(self.rate), self._tokens)
+            self._ts = t
 
     def consume(self, n: int):
-        if self.rate <= 0:
-            return
         n = max(1, int(n))
-        # 小限速下仍允许一次性预支一个完整数据块，避免永久阻塞。
-        # 这相当于在低速时把实际突发提到 READ_SIZE，保证功能可用。
-        burst = max(self._MIN_BURST, self.rate)
-        # ★ v3.1.8 严重缺陷修复：单次请求量可能**大于** burst。
-        #   readinto(mv) 的 mv 是整个区块（最大 block_size=1MB），
-        #   BufferedReader.readinto 会一直读到填满，实测一次就返回 1MB。
-        #   而限速 500KB/s 时 burst = 500KB < 1MB —— tokens 被 min(burst, …)
-        #   压住，永远达不到 n，consume() 变成永久死循环，任务彻底卡死
-        #   （实测：4MB 文件卡在 1/4 区块、120 秒零进展、线程全部堵在 consume）。
-        #   修法：把 n 拆成不超过 burst 的片段依次获取，令牌账目仍然连续准确。
         while n > 0:
-            take = min(n, burst)
-            while True:
-                with self._lock:
-                    t = now()
-                    self._tokens = min(burst,
-                                       self._tokens + (t - self._ts) * self.rate)
-                    self._ts = t
-                    if self._tokens >= take:
-                        self._tokens -= take
-                        break
-                    # 要满足 take，需要等的时间；rate=0 上面已返回，不会除零。
-                    wait = (take - self._tokens) / float(self.rate)
-                time.sleep(min(max(wait, 0.005), 0.25))
-            n -= take
+            with self._lock:
+                if self.rate <= 0:
+                    return
+                t = time.monotonic()
+                # 容量一秒流量；读取块大于容量时分批等待，不死锁。
+                self._tokens = min(float(self.rate),
+                                   self._tokens + max(0.0, t - self._ts) * self.rate)
+                self._ts = t
+                # 只能消费完整字节。此前 0 < tokens < 1 也走消费分支，
+                # int(take) 等于 0，n 永远不减少；浮点残量又使 wait 分支
+                # 几乎不可达，最终形成高开销忙循环，实际限速慢数倍。
+                if self._tokens >= 1.0:
+                    take = min(n, int(self._tokens))
+                    self._tokens -= take
+                    n -= take
+                    continue
+                # 只等"攒够 1 个令牌"的时间。
+                # 曾尝试改成 (need - tokens)/rate（攒够本次请求量再取），
+                # 理由是"消除 1ms 忙轮询导致的突发"——但该结论来自探针 v1
+                # 的错误计数（在 consume 入口累加，把仍在阻塞的调用也算成
+                # 已发放，得出 1.7~2.7 倍超发的假象）。
+                # 探针 v5 全量台账（逐次 consume + 逐次写入双向对账）显示
+                # 限速器本身完全准确：累计发放 11MiB / 12.41s ≈ 0.93MB/s，
+                # 与设定 1MB/s 相符；超发的真实来源是 _probe 预取首块
+                # （写 12MiB vs 发放 11MiB，差额正好 1MiB）。
+                # 改法反而让 E1 回归：500KB/s 下 4MB 理论 8.19s 实测 12.3s
+                # （比值 1.50，超过 1.45 上限）。故保持原实现。
+                wait = (1.0 - self._tokens) / float(self.rate)
+            # 不在持锁状态睡眠，免得一个工作线程挡住其它线程或改速操作。
+            time.sleep(min(max(wait, 0.001), 0.1))
 
 
 # --------------------------------------------------------------------------
@@ -969,13 +1027,16 @@ class DownloadTask:
         self.out_dir = os.path.abspath(out_dir)
         ensure_dir(self.out_dir)
         self.filename = safe_filename(filename) if filename else filename_from_url(url)
-        self.tid = tid or hashlib.md5(f"{url}|{now()}".encode("utf-8")).hexdigest()[:12]
+        # v3.1.10: 随机 UUID 而非 url + 微秒时间戳。后者在并发新增时会碰撞。
+        self.tid = tid or uuid.uuid4().hex[:12]
         self.requested_conns = max(1, min(32, int(conns)))
         self.kind = kind if kind in ("file", "hls", "bt") else kind_of_url(url)
         self.speed_limit = max(0, int(speed_limit or 0))
         self.group = group or ""
         self.added_at = added_at or now()
         self.extra_headers = dict(headers or {})
+        # 所有任务都有统一的可选参数字典；Manager.add_task 会覆盖为调用方配置。
+        self.extra = {}
 
         self.http = HttpHelper(referer=referer, cookie=cookie, proxy=proxy,
                                insecure=insecure, extra=self.extra_headers)
@@ -991,11 +1052,16 @@ class DownloadTask:
         self.phase = "准备中"
         self.created_final = ""
         self.resumable = True
+        self._history_committed = False
 
         self._stop = False
         self._wake = threading.Event()
         self._lock = threading.RLock()
         self._slot_held = False
+        # ★ v3.1.10：会话运行标志 —— 记录 _session() 是否正在执行。
+        #   start() 靠它区分"暂停已生效（会话已退出）"与"暂停尚未生效
+        #   （会话仍在运行）"两种情形，见 start() 内的竞态修复说明。
+        self._session_active = False
         self._tick_t = now()
         self._tick_b = 0
         self._run_thread: threading.Thread | None = None
@@ -1009,7 +1075,11 @@ class DownloadTask:
                 old = getattr(self, "target", 1)
                 self.target = n
                 if n > old and self.state == STATE_DOWNLOADING:
-                    need = n - self.active_conns()
+                    with self._qlock:
+                        available = (len(self._queue) +
+                                     sum(1 for i, b in enumerate(self.bitmap or [])
+                                         if not b and i not in self._inflight))
+                    need = min(n - self.active_conns(), available)
                     if need > 0:
                         self._spawn_workers(need)
                 # 降低时 _worker 自行判断 active_conns() > target 后退出
@@ -1024,8 +1094,35 @@ class DownloadTask:
             return
         if self.state in (STATE_PAUSED, STATE_ERROR):
             self.err = "" if self.state == STATE_ERROR else self.err
-            self.state = STATE_WAIT
-            self.phase = "排队中"
+            # ★ v3.1.10 修复（探针 probe-pause-race.py 实证，3/3 稳定复现）：
+            #   `pause()` 只是把状态置为 PAUSED，而 `_session()` 主循环要等
+            #   最多 0.4s（`_done_evt.wait(0.4)`）才会醒来看到并退出收尾。
+            #   用户在这 0.4s 窗口内点"继续"就会踩中本竞态：
+            #     · 此处若把状态写成 WAIT，则主循环醒来时 PAUSED/CANCELLED
+            #       **两个退出分支都不匹配** → 它带着"排队中"一路继续下载，
+            #       而把状态置回 DOWNLOADING 的赋值只在 `run()` 外层、
+            #       要等 `_session()` 返回才执行 → state 永远卡在 waiting。
+            #     用户可见后果（round9 GUI 实测，30s 超时现场）：
+            #       state='waiting' 却 done_bytes=28311552 在涨、
+            #       speed=2598696、phase='4 线程 · 区块 27/64'（主循环在写）；
+            #       紧接着「增加 8 个线程」被 boost_selected 按
+            #       `state == DOWNLOADING` 拦截 → 点了没反应。
+            #     探针实证：pause()→0.05s→start() 连续 3 轮，每轮 120 帧全部
+            #       state='waiting' 且 done 涨 10~12MB（A_RACE_REPRODUCED）。
+            #   修法：会话仍在运行（`_session_active`）时，"继续"的语义是
+            #   **撤销暂停**，直接把状态改回 DOWNLOADING（并更新 phase），
+            #   让运行中的会话无缝继续；只有会话确已退出收尾（暂停生效）
+            #   时才走原来的"重新排队"路径。
+            if getattr(self, "_session_active", False):
+                # 会话仍在跑 → 撤销暂停。phase 不用精修：会话主循环每轮
+                # 都会重写它；这里只给一个立刻可读的值。
+                # 注意 start() 在基类上，nblocks/_missing_blocks 只属于
+                # FileDownload，不能无条件引用（HLS/BT/aria2 会 AttributeError）。
+                self.state = STATE_DOWNLOADING
+                self.phase = "下载中"
+            else:
+                self.state = STATE_WAIT
+                self.phase = "排队中"
             self._wake.set()
             self.mgr.notify()
 
@@ -1049,8 +1146,27 @@ class DownloadTask:
         self.mgr.notify()
 
     def remove(self, delete_files: bool = False):
+        """从任务列表移除（可选删除临时文件）。
+
+        ★ v3.1.10 修复（GUI 沙盒实测发现，真实产品缺陷）：
+          `remove_task()` 收到的是**默认的 delete_files=False**，此前这里
+          只写了 `self.mgr.remove_task(self.tid)`，把用户"删除任务和临时文件"
+          的意图在最后一跳丢掉了。后果（实测复现）：
+            · `cancel(delete_files=True)` 里的 rmtree 在工作线程**还活着**
+              时执行 —— 线程随后 ensure_dir(self.tmp_dir) 把目录**重建**回来，
+              v3.1.8 修过一次的"删了又回来"在老路径上重现；
+            · `remove_task()` 因为 delete_files=False，直接跳过 v3.1.10 新加的
+              完整清理（_stop_workers + _close_tl_handles + join + 双 rmtree），
+              于是 .xzd/<tid> 原地残留。
+          对照证据：测试里直接调 `mgr.remove_task(tid, delete_files=True)`
+          的 J6 一直通过；而 GUI 走 `del_selected(True) → t.remove(True)`
+          这条路径必然残留 —— 两条入口行为不一致，测试只覆盖了前者。
+          修法：把 delete_files 一路透传下去，让 remove_task 统一做
+          "先停线程、再删目录"的收尾，cancel 里那次提前 rmtree 由
+          remove_task 的双次 rmtree 兜底清干净。
+        """
         self.cancel(delete_files=delete_files)
-        self.mgr.remove_task(self.tid)
+        self.mgr.remove_task(self.tid, delete_files=delete_files)
 
     def add_connections(self, k: int = 8):
         return self.mgr.add_connections(self, k)
@@ -1146,6 +1262,72 @@ class DownloadTask:
     def target_conns(self) -> int:
         return self.requested_conns
 
+    def _postprocess(self):
+        """先完成可选后处理，再由具体下载通道提交唯一的最终产物。"""
+        extra = getattr(self, "extra", {})
+        if extra.get("audio_only"):
+            self.phase = "正在提取音频"
+            self._extract_audio()
+        if extra.get("paired_audio"):
+            self.phase = "正在合并音视频"
+            self._merge_with_audio()
+
+    def _complete(self, final_path: str = "", phase: str = "已完成"):
+        """内置/aria2 通道的统一收尾：后处理成功后才公开完成状态。"""
+        if self.state == STATE_DONE:
+            return
+        self._postprocess()
+        # 后处理可能把最终交付物从视频改成 MP3 / 合并后的 MP4。
+        # 此后提交必须以 self.created_final 为准，不能再用通道传入的旧路径。
+        final = self.created_final or final_path
+        if getattr(self, "_defer_history", False):
+            # FileDownload 转交 HLS 时，由宿主任在结果回写后统一提交历史。
+            self.state = STATE_DONE
+            self.phase = phase
+            return
+        self.mark_done(final, phase)
+
+    def _final_result_size(self, final: str) -> int:
+        """统计交付物大小；BT 目录优先使用 aria2 返回的实际文件清单。"""
+        if os.path.isfile(final):
+            return os.path.getsize(final)
+        if not os.path.isdir(final):
+            raise RuntimeError("下载结果文件或目录不存在，不能提交完成状态")
+        files = getattr(self, "extra", {}).get("bt_files") or []
+        if files:
+            total = 0
+            for path in files:
+                if os.path.isfile(path):
+                    total += os.path.getsize(path)
+            return total
+        return sum(os.path.getsize(os.path.join(root, name))
+                   for root, _, names in os.walk(final) for name in names
+                   if os.path.isfile(os.path.join(root, name)))
+
+    def mark_done(self, final_path: str = "", phase: str = "已完成"):
+        """原子提交最终结果：历史先可见，再把任务公开为已完成。
+
+        调用方必须先完成所有 FFmpeg 后处理；本方法只提交一次，后续重复调用
+        不会再次触发后处理或改写最终路径。这样扩展的 /status 与 /history
+        在任意时刻至少有一个视图包含该任务，不会出现完成边界上的空窗。
+        """
+        if self.state == STATE_DONE:
+            return
+        if getattr(self, "_history_committed", False):
+            raise RuntimeError("任务历史已提交，不能再次提交完成结果")
+        final = os.path.abspath(final_path or self.created_final)
+        size = self._final_result_size(final)
+        # 先保留原状态，直到历史写盘成功；写盘失败不能留下“已完成”的假状态。
+        self.created_final = final
+        self.filename = os.path.basename(final)
+        self.size = size
+        self.done_bytes = size
+        self.progress = 1.0
+        self.mgr.commit_history(self)
+        self._history_committed = True
+        self.state = STATE_DONE
+        self.phase = phase
+
     # ---- 进度/速度 ----
     def _tick_speed(self):
         t = now()
@@ -1192,6 +1374,7 @@ class DownloadTask:
                     self.mgr.release_slot(self)
                     continue
                 self.state = STATE_DOWNLOADING
+                self._session_active = True      # ★ v3.1.10：会话运行标志
                 try:
                     self._session()
                 except Exception as e:  # noqa
@@ -1199,22 +1382,27 @@ class DownloadTask:
                     self.err = f"{type(e).__name__}: {e}。可右键任务 → 用 aria2c 极速重试"
                     self.phase = "出错（可用 aria2c 重试）"
                 finally:
+                    self._session_active = False     # ★ v3.1.10：会话结束
                     self.mgr.release_slot(self)
-                    self.mgr.save_jobs()
                     self.mgr.notify()
                 if self.state == STATE_DONE:
-                    self.phase = self.phase if self.phase else "已完成"
-                    # 音频提取（extra.audio_only）
-                    if getattr(self, 'extra', {}).get('audio_only'):
-                        self._extract_audio()
-                    # 音视频合并（extra.paired_audio）
-                    if getattr(self, 'extra', {}).get('paired_audio'):
-                        self._merge_with_audio()
+                    try:
+                        # 具体通道已先后处理并调用 _complete()/mark_done()。
+                        # 此处只负责统一通知，绝不能再次删除原始文件或改写历史。
+                        if self.extra.get("audio_only") or self.extra.get("paired_audio"):
+                            self.phase = "已完成（后处理）"
+                    except Exception as exc:
+                        self.state = STATE_ERROR
+                        self.err = f"下载完成，但结果提交失败：{type(exc).__name__}: {exc}"
+                        self.phase = "后处理失败"
+                        LOG.once_exc("commit_done", "完成结果提交失败 tid=%s", self.tid)
+                    self.mgr.save_jobs()
                     if self.mgr.on_task_done:
                         try:
                             self.mgr.on_task_done(self)
                         except Exception:
                             LOG.debug('忽略异常：mgr.on_task_done(self)')
+                    self.mgr.notify()
                     return
         except BaseException as e:
             # v1.11.0：任务主循环**最后一道防线**。
@@ -1242,50 +1430,118 @@ class DownloadTask:
     def _extract_audio(self):
         """用 FFmpeg 把已下载的视频/音频文件抽音轨转 MP3。"""
         src = getattr(self, 'created_final', None)
-        if not src or not os.path.exists(src):
-            return
+        if not src or not os.path.isfile(src):
+            raise RuntimeError("提取音频的源文件不存在")
         ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
         if not os.path.exists(ffmpeg):
-            return
+            raise RuntimeError("缺少 FFmpeg，无法提取音频")
         dst = os.path.splitext(src)[0] + ".mp3"
+        # ★ v3.1.10 修复（探针 probe-audio-only-path.py 实证，真实产品缺陷）：
+        #   dst 可能与 src **完全同一路径** —— 调用方若直接用 `.mp3` 作为
+        #   任务文件名（旧版 GUI「仅音频」会预改名；API/外部集成本来就允许
+        #   任意 filename），`splitext(src)[0] + ".mp3"` 求值仍等于 src，
+        #   而 FFmpeg **拒绝原地编辑**。
+        #   决定性证据（离线对照，同一份含音轨 mp4）：
+        #     · dst≠src → rc=0，正常产出 MP3（7.5KB，-map 0:a:0 探测 rc=0）
+        #     · dst=src → rc=1：
+        #         "Output ...av_named_mp3.mp3 same as Input #0 - exiting"
+        #         "FFmpeg cannot edit existing files in-place."
+        #   真实 Manager 路径对照：A（含音轨 + `xxx.mp3`）→ error；
+        #   B（含音轨 + `xxx.mp4`）→ done。→ A_DST_SRC_COLLIDE
+        #   用户可见后果：凡「视频 → 仅音频」必然失败（round12 GUI 实测
+        #   90s 超时现场：state='error' 而 done_bytes=4849 文件已下完），
+        #   且目录里留下一个**后缀 .mp3、内容却是 mp4** 的坏文件。
+        #   修法：同名时先把源搬到临时名，从临时名提取到 dst —— 最终交付物
+        #   仍落在 dst（用户预期的 .mp3 路径不变）。失败时把源**原样搬回**、
+        #   清掉半成品，绝不让下载成果改名或丢失。
+        same = (os.path.normcase(os.path.abspath(dst))
+                == os.path.normcase(os.path.abspath(src)))
+        feed = src
+        moved = False
+        if same:
+            feed = src + ".xzd-avsrc"
+            try:
+                if os.path.exists(feed):
+                    os.remove(feed)
+                os.replace(src, feed)
+                moved = True
+            except OSError as exc:
+                raise RuntimeError(f"音频提取失败：无法腾出输出路径（{exc}）") from exc
         try:
             r = subprocess.run(
-                [ffmpeg, "-y", "-i", src, "-vn", "-acodec", "libmp3lame",
+                [ffmpeg, "-y", "-i", feed, "-vn", "-acodec", "libmp3lame",
                  "-q:a", "2", dst],
                 capture_output=True, timeout=300,
                 creationflags=subprocess.CREATE_NO_WINDOW)
-            if r.returncode == 0 and os.path.exists(dst):
+            if r.returncode != 0 or not os.path.isfile(dst):
+                # ★ v3.1.10 优化：原实现把 stderr 尾部 1200 字符原样抛给用户，
+                #   实测（probe-audio-only-path.json）那一段里混着 FFmpeg 的
+                #   编译配置（`--extra-libs=-lgomp` 等），用户完全看不懂，
+                #   还把真正有用的失败行盖住了。改为先识别典型失败给中文提示。
+                text = r.stderr.decode("utf-8", "replace")
+                low = text.lower()
+                if "does not contain any stream" in low or "matches no streams" in low:
+                    brief = "该资源不含音轨，无法提取音频（可改用「下载视频」）"
+                elif "same as input" in low or "cannot edit existing files" in low:
+                    brief = "输出文件与源文件同名，FFmpeg 无法原地编辑"
+                else:
+                    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                    brief = lines[-1][:300] if lines else "FFmpeg 返回非零退出码"
+                raise RuntimeError(f"FFmpeg 提取音频失败（exit={r.returncode}）：{brief}")
+            if moved:
+                try:
+                    os.remove(feed)
+                except OSError:
+                    LOG.debug('忽略异常：清理抽音轨源临时文件')
+            else:
                 os.remove(src)
-                self.created_final = dst
-                self.filename = os.path.basename(dst)
-                self.size = os.path.getsize(dst)
-                self.done_bytes = self.size
-        except Exception:
-            pass
+            self.created_final = dst
+        except Exception as exc:
+            # 失败兜底：把源文件恢复回原路径（下载成果必须保留），
+            # 再清掉可能生成的半成品 —— 用户仍可右键改用「下载视频」或 aria2c 重试。
+            if moved:
+                try:
+                    if os.path.exists(feed):
+                        # FFmpeg 万一在 dst（==src 路径）写出过部分内容，
+                        # 也以 feed 里的原始下载成果为准覆盖回去。
+                        if os.path.exists(src):
+                            os.remove(src)
+                        os.replace(feed, src)
+                except OSError:
+                    LOG.debug('忽略异常：恢复抽音轨源文件')
+            try:
+                if (os.path.exists(dst) and os.path.normcase(os.path.abspath(dst))
+                        != os.path.normcase(os.path.abspath(src))):
+                    os.remove(dst)
+            except OSError:
+                LOG.debug('忽略异常：清理抽音轨半成品')
+            raise RuntimeError(f"音频提取失败：{exc}") from exc
 
     def _merge_with_audio(self):
         """下载完成后，自动下载配对音频并用 FFmpeg 合并为完整视频。"""
         video_path = getattr(self, 'created_final', None)
         audio_url = self.extra.get('paired_audio') if self.extra else None
         if not video_path or not os.path.exists(video_path) or not audio_url:
-            return
+            raise RuntimeError("合并音视频所需的源文件或配对音频地址无效")
         ffmpeg = os.path.join(app_root(), "third_party", "ffmpeg.exe")
         if not os.path.exists(ffmpeg):
-            return
+            raise RuntimeError("缺少 FFmpeg，无法合并音视频")
         # 下载配对音频到同目录
         audio_path = os.path.splitext(video_path)[0] + "_audio.mp3"
         try:
             # 创建音频下载任务（内部走 Manager，避免重复造轮子）
             t = self.mgr.add_task(audio_url, out_dir=os.path.dirname(video_path),
                                   filename=os.path.basename(audio_path),
-                                  referer=self.http.referer, cookie=self.http.cookie)
+                                  referer=self.http.referer, cookie=self.http.cookie,
+                                  extra={"internal": True})
             # 等待音频下载完成（最多 10 分钟）
             wait = 0
             while t.state not in (STATE_DONE, STATE_ERROR, STATE_CANCELLED) and wait < 600:
                 time.sleep(1)
                 wait += 1
-            if t.state != STATE_DONE or not os.path.exists(t.created_final):
-                return
+            if t.state != STATE_DONE or not os.path.isfile(t.created_final):
+                detail = t.err or t.phase or "配对音频未生成有效文件"
+                raise RuntimeError(f"配对音频下载失败：{detail}")
             audio_path = t.created_final
             # FFmpeg 合并：视频流 copy + 音频流 copy
             out_path = os.path.splitext(video_path)[0] + "_merged.mp4"
@@ -1294,20 +1550,15 @@ class DownloadTask:
                  "-c:v", "copy", "-c:a", "aac", "-strict", "experimental", out_path],
                 capture_output=True, timeout=300,
                 creationflags=subprocess.CREATE_NO_WINDOW)
-            if r.returncode == 0 and os.path.exists(out_path):
-                # 合并成功：删除分离的视频和音频，保留合并后文件
-                os.remove(video_path)
-                os.remove(audio_path)
-                self.created_final = out_path
-                self.filename = os.path.basename(out_path)
-                self.size = os.path.getsize(out_path)
-                self.done_bytes = self.size
-        except Exception:
-            pass
-
-
-# --------------------------------------------------------------------------
-# 文件下载：区块位图 + 单文件随机写入（aria2 式）
+            if r.returncode != 0 or not os.path.isfile(out_path):
+                detail = r.stderr.decode("utf-8", "replace")[-1200:].strip()
+                raise RuntimeError(f"FFmpeg 合并失败（exit={r.returncode}）：{detail}")
+            # 合并成功：删除分离的视频和音频，保留合并后文件。
+            os.remove(video_path)
+            os.remove(audio_path)
+            self.created_final = out_path
+        except Exception as exc:
+            raise RuntimeError(f"音视频合并失败：{exc}") from exc
 # --------------------------------------------------------------------------
 
 class FileDownload(DownloadTask):
@@ -1407,14 +1658,31 @@ class FileDownload(DownloadTask):
         last_err = None
         for attempt in range(10):
             try:
-                req = urllib.request.Request(self.url, headers=self.http.headers(extra))
+                # ★ v3.1.10：探测请求同样要规范化 URL（空格 → %20），
+                #   否则带空格链接会在**探测阶段**就 InvalidURL 失败。
+                req = urllib.request.Request(self.http.normalize_url(self.url),
+                                             headers=self.http.headers(extra))
                 with self.http._opener.open(req, timeout=SOCKET_TIMEOUT) as r:
                     status = getattr(r, "status", 200)
                     hdrs = dict(r.headers)
                     if status == 206:
                         # 只读一个区块就断开；多余部分不会产生额外流量
                         try:
-                            seed = r.read(want)
+                            # ★ v3.1.10 修复（E2 动态限速实测回归）：
+                            #   用户设了限速时必须放弃预取。探针逐次台账
+                            #   （probe-e2-v5.json）实测证据：
+                            #     · 限速 1MB/s 的任务，首块在 t=1.049s 就已写入
+                            #       data.bin（tid=25624，wid=0，start=0）
+                            #     · 而限速器到 t=7.402s 才发放完第一份 1MB 令牌
+                            #     · 累计对账：写盘 12MB vs 发放 11MB，差额**正好
+                            #       1MB** —— 就是这块免限速的预取数据
+                            #   后果：3 秒窗口实测超发 1.7~2.7 倍；对小文件
+                            #   更是直接跳过用户限速（1.5MB 文件 = 66% 超发）。
+                            #   不限速（rate<=0）时保留预取，省一次完整建连往返。
+                            if self.limiter.rate > 0:
+                                seed = b""
+                            else:
+                                seed = r.read(want)
                         except Exception:
                             seed = b""
                 if status in RATE_LIMIT_CODES:
@@ -1656,15 +1924,30 @@ class FileDownload(DownloadTask):
                 # 当前任务在并发槽位之外，先不启动工作线程，等待槽位释放
                 # v3.1.8：target 归 0，避免界面/快照把排队任务显示成"1 线程"
                 self.target = 0
-                self.state = STATE_WAIT
-                self.phase = "排队中（等待并发槽位）"
+                # ★ v3.1.10 修复（C1 插队抢占实测回归）：
+                #   本分支绝不能覆盖"暂停/取消"这类用户可见状态。
+                #   实测现场：t1 仍在探测阶段时被插队任务挤掉，pause() 已把它
+                #   置为 PAUSED 并写入"已暂停（被插队任务挤掉）"；但 t1 的
+                #   _session() 继续往下跑到这里，又把它改写成 WAIT +
+                #   "排队中（等待并发槽位）" —— 用户看到任务从"下载中"变成
+                #   "排队中"，暂停原因丢失，且它会绕过用户意愿自行重新排队下载。
+                # ★ 回滚记（v3.1.10）：此处曾加过 `alive_workers` 判据防
+                #   "在跑却报 waiting"，但复跑 probe-resume-state.py 后
+                #   anomaly 由 1 增至 3 —— 判定被证伪：本分支**不是**异常
+                #   帧的来源（异常帧 phase='排队中' 无后缀、且 target 未被
+                #   归 0，说明根本没进本分支）。真因在 `_session()` 主循环
+                #   的暂停检测窗口，修复见下方 while 循环内的 WAIT 修正。
+                if self.state not in (STATE_PAUSED, STATE_CANCELLED):
+                    self.state = STATE_WAIT
+                    self.phase = "排队中（等待并发槽位）"
                 self.mgr.release_slot(self)
                 self.mgr.notify()
                 return
             if fair < self.target:
                 self.target = fair
         self._stop_workers = False
-        self._spawn_workers(self.target)
+        # 线程数不能超过未完成区块数；2MB 文件不应启动 24 个抢锁的工作线程。
+        self._spawn_workers(min(self.target, len(self._missing_blocks())))
         last_save = now()
         self._last_progress_t = now()
         self._last_progress_b = self.done_bytes
@@ -1723,7 +2006,8 @@ class FileDownload(DownloadTask):
                     self.target = fair
                 current_target = self.target
             if current_target > alive:
-                self._spawn_workers(current_target - alive)
+                available = len(self._missing_now())
+                self._spawn_workers(min(current_target - alive, available))
             # 完成一批区块后可能有大量空闲线程 → 让线程自然退出
             if now() - last_save >= BITMAP_SAVE_INTERVAL:
                 self._save_state()
@@ -1771,12 +2055,25 @@ class FileDownload(DownloadTask):
         with self._target_lock:
             if self.target <= 0:
                 return
-            k = min(int(k), 32 - len(self._workers))
-        for _ in range(max(0, k)):
-            t = threading.Thread(target=self._worker, daemon=True,
-                                 name=f"xzd-{self.tid}")
-            self._workers.append(t)
-            t.start()
+            # ★ v3.1.10 修复（D1 暂停恢复实测回归）：
+            #   必须先剔除已退出的线程再算"名额"。实测现场：暂停时 8 个工作
+            #   线程全部退出，但 _workers 列表仍留着这 8 个死线程；恢复后
+            #   `target - len(_workers)` = 8 - 8 = 0 → 一个线程都补不出来，
+            #   进度永久停在暂停时的位置，直到 120s 后被"长时间无数据进展"
+            #   误判为出错。剔除死线程后按存活数计名额，恢复即可正常续传。
+            self._workers = [t for t in self._workers if t.is_alive()]
+            alive = len(self._workers)
+            k = min(int(k), 32 - alive, max(0, self.target - alive))
+            if self.bitmap is not None:
+                k = min(k, sum(1 for b in self.bitmap if not b))
+            # 登记与启动必须与上面的剔除在同一临界区内完成，否则另一个
+            # 调用方可能在剔除瞬间丢掉刚 append、尚未 start 的新线程对象
+            # （未 start 的线程 is_alive() 为 False，会被当成死线程剔除）。
+            for _ in range(max(0, k)):
+                t = threading.Thread(target=self._worker, daemon=True,
+                                     name=f"xzd-{self.tid}")
+                self._workers.append(t)
+                t.start()
         self.phase = f"{self.target} 线程"
 
     def _join_workers(self, timeout: float):
@@ -2336,8 +2633,7 @@ class FileDownload(DownloadTask):
         except OSError:
             LOG.debug('忽略异常：size = os.path.getsize(final)')
         self.progress = 1.0
-        self.state = STATE_DONE
-        self.phase = "已完成"
+        self._complete(final)
         self._cleanup_tmp()
 
     # ---------- 收尾 ----------
@@ -2350,6 +2646,8 @@ class FileDownload(DownloadTask):
                           speed_limit=self.speed_limit, kind="hls",
                           added_at=self.added_at)
         hls._st = self._st if hasattr(self, "_st") else None
+        hls.extra = self.extra
+        hls._defer_history = True
         hls.run_once(self)
 
     def _finalize(self):
@@ -2390,10 +2688,7 @@ class FileDownload(DownloadTask):
         self.created_final = final
         self.filename = os.path.basename(final)
         self.progress = 1.0
-        self.state = STATE_DONE
-        self.phase = "已完成"
-        if self.size:
-            self.done_bytes = self.size
+        self._complete(final)
         self._cleanup_tmp()
 
     def _start_prealloc(self, size: int):
@@ -2593,12 +2888,9 @@ class BTDownload(DownloadTask):
             on_refetch_trackers=refetch_trackers)
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "aria2c BT 下载失败"))
-        # 附加记录：种子文件列表
-        try:
-            self.extra["bt_files"] = result.get("files", [])
-            self.extra["bt_file_count"] = result.get("file_count", 0)
-        except Exception:
-            pass
+        # 先登记实际文件清单，mark_done 用该清单统计多文件 BT 的总大小。
+        self.extra["bt_files"] = result.get("files", [])
+        self.extra["bt_file_count"] = result.get("file_count", 0)
 
 
 # --------------------------------------------------------------------------
@@ -2954,13 +3246,12 @@ class HLSDownload(DownloadTask):
         self.size = written
         self.done_bytes = written
         self.progress = 1.0
-        self.state = STATE_DONE
+        # 无损转封装成功后才提交最终路径，历史不会指向随后被删除的 ts。
+        self._remux_to_mp4(final)
         note = "（直播流：仅保存了当前可见分片）" if self.is_live else ""
-        self.phase = f"已完成{note}"
+        self._complete(self.created_final, f"已完成{note}")
         if self.mgr.cfg.get("delete_tmp_after_done", True):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
-        # FFmpeg 无损转封装 ts → mp4
-        self._remux_to_mp4(final)
 
     def _remux_to_mp4(self, src: str):
         """ts 无损转封装为 mp4。需要 third_party/ffmpeg.exe。"""
@@ -3003,6 +3294,9 @@ class HLSDownload(DownloadTask):
         host.err = self.err
         host.created_final = self.created_final
         host.filename = self.filename
+        if self.state == STATE_DONE:
+            # HLS 的后处理发生在独立任务对象上，完成后由宿主任一次提交历史。
+            host.mark_done(host.created_final, host.phase)
 
 
 # --------------------------------------------------------------------------
@@ -3409,18 +3703,33 @@ class Manager:
     def on_task_end(self, task: DownloadTask):
         self.release_slot(task)
         self.save_jobs()
-        # v3.0.7: 完成任务记录到扩展历史（保留最近 200 条）
-        if task.state == STATE_DONE and task.created_final:
-            self._add_history({
-                "tid": task.tid,
-                "url": task.url,
-                "filename": task.filename,
-                "final": task.created_final,
-                "out_dir": task.out_dir,
-                "size": task.size,
-                "done_at": now(),
-            })
+        # 正常完成已在 DownloadTask.mark_done 提交历史，这里不再重复落盘。
         self.notify()
+
+    def commit_history(self, task: DownloadTask):
+        """保存一条完成历史；写盘失败时抛出，禁止伪装成已完成。"""
+        record = {
+            "tid": task.tid, "url": task.url, "filename": task.filename,
+            "final": task.created_final, "out_dir": task.out_dir,
+            "size": task.size, "done_at": now(),
+        }
+        with self._lock:
+            if getattr(task, "extra", {}).get("internal"):
+                return
+            for old in self._history:
+                if old.get("tid") == task.tid:
+                    return
+            self._history.append(record)
+            if len(self._history) > 200:
+                self._history = self._history[-200:]
+            tmp = self._history_path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self._history, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self._history_path)
+            except Exception:
+                self._history = [h for h in self._history if h.get("tid") != task.tid]
+                raise
 
     # ---- 任务 ----
     def add_task(self, url: str, *, out_dir: str | None = None, filename: str = "",
@@ -3469,22 +3778,13 @@ class Manager:
         task.extra = extra or {}
         task._priority = bool(priority)
         with self._lock:
+            # v3.1.10: 登记是最后一道唯一性闸门。旧版会覆盖 tasks[tid]，
+            # 导致旧任务仍在线程中运行却从 GUI 消失，并共用续传目录。
+            # load_jobs 的恢复 tid 在注册前不会冲突，因此仍能沿用原断点。
+            while task.tid in self.tasks:
+                task.tid = uuid.uuid4().hex[:12]
             self.tasks[task.tid] = task
-            # ★ v3.1.9 严重缺陷修复：order 必须防重。
-            #   tid 由 md5(url|now()) 生成，两次 add 落在同一微秒时（本地环回
-            #   下载极快、扩展/协议同时触发）会得到**完全相同**的 tid。
-            #   此前无脑 insert → order 里出现两条同一 tid →
-            #   ① snapshots() 返回重复条目 → GUI tree.insert 抛
-            #      TclError: Item xxx already exists → **主线程崩溃、进程直接退出**
-            #      （用户视角：界面突然消失、浏览器扩展点「打开/目录」毫无反应）
-            #   ② save_jobs() 把重复写进 jobs.json，重启 load_jobs 再叠加一次，
-            #      越滚越多，形成不可自愈的恶性循环。
-            #   这里保证同一 tid 在 order 中最多出现一次。
-            if task.tid not in self.order:
-                self.order.insert(0, task.tid)
-            else:
-                self.order.remove(task.tid)
-                self.order.insert(0, task.tid)
+            self.order.insert(0, task.tid)
         task.state = STATE_WAIT
         t = threading.Thread(target=task.run, daemon=True, name=f"xzd-{task.tid}")
         task._run_thread = t
@@ -3659,6 +3959,21 @@ class Manager:
             #   ensure_dir(self.tmp_dir) 把目录**重建**出来，用户看到
             #   "任务删了但 .xzd 残留"（实测复现：临时目录未清理）。
             t._stop = True
+            # ★ v3.1.10 修复（J6 实测仍残留：临时目录未清理）：
+            #   只置 _stop 是不够的 —— _session() 的 while 条件退出时
+            #   **不会**设置 _stop_workers，工作线程仍在 _download_block 里
+            #   阻塞于网络读取并握着 data.bin 的写句柄。Windows 上"被打开的
+            #   文件无法删除"，所以 shutil.rmtree(ignore_errors=True) 会静默
+            #   失败，.xzd/<tid> 目录原地留下（实测报错正是这一条）。
+            #   修法：一并停工作线程 + 强制关闭全部缓存句柄，再 join，最后删。
+            if hasattr(t, "_stop_workers"):
+                t._stop_workers = True
+            try:
+                _close = getattr(t, "_close_tl_handles", None)
+                if callable(_close):
+                    _close()          # 强制关闭各工作线程缓存的写句柄
+            except Exception:
+                LOG.debug('忽略异常：remove_task 强制关闭句柄')
             try:
                 t._wake.set()
             except Exception:
@@ -3666,6 +3981,40 @@ class Manager:
             th = getattr(t, "_run_thread", None)
             if th is not None and th.is_alive():
                 th.join(timeout=3.0)
+            # ★ v3.1.10 修复（探针 probe-delete-running.py 实证，真实产品缺陷）：
+            #   仅停下载线程 + 关句柄是**不够的** —— 还有 4 个「专职写线程」
+            #   (`_writer_loop`) 存活：它们阻塞在 `self._wr_q.get()` 上，
+            #   既不因 `_stop_workers` 退出，也不会自己结束。
+            #   实测证据（T3 场景：下载中直接删除）：
+            #     writers_alive_after=4 / reg_handles_after=4 / 目录残留 data.bin
+            #   为什么 T1/T2 能过而 T3 不能：T1/T2 删除时写线程恰好已自然收尾
+            #   （_wr_q 空且被 drain 过），T3 是"正在写盘"的稳定态 ——
+            #   写线程活着 → 下载线程的 `_write_at` 同步降级路径继续
+            #   `open(data_path, "r+b")` 把文件**重新创建** → 目录复活。
+            #   修法：按 `_drain_writers` 的既有语义（投 None 毒丸 + join +
+            #   clear）干净收掉写线程，再做 rmtree。它在暂停/取消/出错路径
+            #   早已被调用，这里是唯一漏掉的路径。
+            try:
+                _drain = getattr(t, "_drain_writers", None)
+                if callable(_drain):
+                    _drain(timeout=10.0)
+            except Exception:
+                LOG.debug('忽略异常：remove_task drain 写线程')
+            # 工作线程可能仍阻塞在网络读取上，再给一次汇合窗口
+            try:
+                _join = getattr(t, "_join_workers", None)
+                if callable(_join):
+                    _join(2.0)
+            except Exception:
+                LOG.debug('忽略异常：remove_task 汇合工作线程')
+            # 上面的 drain/join 之后仍可能有残留句柄（例如网络线程刚打开）
+            # → 再强制关一次，再做 rmtree。
+            try:
+                _close2 = getattr(t, "_close_tl_handles", None)
+                if callable(_close2):
+                    _close2()
+            except Exception:
+                LOG.debug('忽略异常：remove_task 二次强制关闭句柄')
             # 线程退出后仍可能有最后一次落盘，删两遍确保干净
             shutil.rmtree(t.tmp_dir, ignore_errors=True)
             shutil.rmtree(t.tmp_dir, ignore_errors=True)
@@ -3848,12 +4197,10 @@ class Manager:
             try:
                 if it.get("state") in (STATE_DONE, STATE_CANCELLED):
                     continue
-                # ★ v3.1.9 防御：存档里若已有重复 tid（旧版写坏的 jobs.json），
-                #   这里必须跳过，否则每次重启都会把重复叠加一次（1→2→4…），
-                #   且重复的 order 会让 snapshots() 返回重复条目 → GUI 崩溃。
+                # v3.1.10: 重复 tid 不能静默丢弃用户的任务。
+                # 第一条沿用原 ID 以保留旧断点；后续由 add_task 分配新 ID，
+                # 从干净断点开始，避免不同 URL 读写同一 data.bin。
                 _tid = it.get("tid") or ""
-                if _tid and _tid in self.tasks:
-                    continue
                 # ★ v3.1.8 严重缺陷修复：必须沿用存档里的 tid。
                 #   断点数据存放在 out_dir/.xzd/<tid>/（meta.json + bitmap.bin
                 #   + data.bin）。此前 add_task 无视存档 tid 自己生成一个新的，
@@ -3881,7 +4228,7 @@ class Manager:
                 u = (it.get("url") or "").strip()
                 if not u or u in existing:
                     continue
-                low = u.lower().split("?")[0]
+                low = urllib.parse.urlsplit(u).path.lower()
                 t = it.get("type") or ("hls" if low.endswith(STREAM_EXTS) else "media")
                 row = {
                     "url": u, "type": t,
@@ -3949,7 +4296,7 @@ def scan_webpage(url: str, http: HttpHelper | None = None) -> dict:
         u = urllib.parse.urljoin(url, u)
         if not u.lower().startswith(("http://", "https://")):
             return
-        low = u.lower().split("?")[0]
+        low = urllib.parse.urlsplit(u).path.lower()
         if low.endswith(STREAM_EXTS):
             t = "hls"
         elif low.endswith(MEDIA_EXTS):
@@ -3999,14 +4346,55 @@ def scan_webpage(url: str, http: HttpHelper | None = None) -> dict:
               (i["type"] == "media" and not i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg"))))]
     audios = [i for i in items if "paired_video" not in i and i["type"] == "media" and
               i["filename"].lower().endswith((".mp3",".m4a",".aac",".flac",".wav",".ogg"))]
+
+    def _pair_key(fn: str) -> str:
+        """把"视频/音频"标识从文件名里剥掉，得到可用于比对的基名。
+
+        ★ v3.1.10 修复（探针 probe-pair-audio.py 实证，真实产品缺陷）：
+          原实现只做 `.replace("_video","").replace("-video","")`，
+          实测（A_PAIRING_TOO_NARROW）漏掉三类**真实站点常见命名**：
+            · 空格分隔：`video only.mp4` + `audio only.mp3`（本项 GUI 实测现场）
+            · 点号分隔：`clip.video.mp4` + `clip.audio.m4a`（FB/IG 常见）
+            · 无分隔符：`videoonly.mp4` + `audioonly.mp3`
+          修法：统一归一化 —— 去掉扩展名后，把 video/audio 标记词
+          （含 `_video`/`-video`/`.video`/` video` 等分隔符变体）剥掉，
+          再去掉所有非字母数字字符，得到纯基名比对。
+        """
+        base = os.path.splitext(fn)[0].lower()
+        # 先处理"video only / audio only"这类**标记词本身**的形态
+        base = _re.sub(r"\b(video|audio)[\s._-]*only\b", "", base)
+        # 再剥掉常规的 video/audio 标记（含分隔符变体）
+        base = _re.sub(r"[\s._-]*(video|audio)\b", "", base)
+        # 最后去掉所有非字母数字字符，让 "video only" 与 "audioonly" 也能对上
+        return _re.sub(r"[^0-9a-z]+", "", base)
+
     for v in videos:
-        vbase = os.path.splitext(v["filename"])[0].lower().replace("_video","").replace("-video","")
+        vbase = _pair_key(v["filename"])
         for a in audios:
-            abase = os.path.splitext(a["filename"])[0].lower().replace("_audio","").replace("-audio","")
+            abase = _pair_key(a["filename"])
+            # 空基名（例如纯 "video only.mp4" vs "audio only.mp3"）在此处
+            # 不配对 —— 那只是"恰好都只有轨道标识"，交给下面的唯一候选兜底。
+            if not vbase or not abase:
+                continue
             if vbase == abase or vbase in abase or abase in vbase:
                 v["paired_audio"] = a["url"]
                 a["paired_video"] = v["url"]
                 break
+    # ★ v3.1.10 补充：**轨道占位式命名**的配对（空基名之间）。
+    #   纯 "video only.mp4" + "audio only.mp3"（本项 GUI 实测现场）以及
+    #   纯 "videoonly.mp4" + "audioonly.mp3" 这类命名**只标轨道、不带基名**，
+    #   归一化后基名为空 —— 上面那轮无法比对。
+    #   但"基名为空"恰恰是**强信号**：名字里除了 video/audio 标记词什么都不剩，
+    #   说明它本来就是"某素材的纯视频轨 / 纯音频轨"（YouTube/FB 导出的常见形态）。
+    #   风险控制：只在这样的视频与音频**各恰好 1 条**时才配对 ——
+    #   多条时无法判断归属，宁可不动（用户仍可手动用「音视频合并」）。
+    _empty_v = [v for v in videos
+                if not _pair_key(v["filename"]) and "paired_audio" not in v]
+    _empty_a = [a for a in audios
+                if not _pair_key(a["filename"]) and "paired_video" not in a]
+    if len(_empty_v) == 1 and len(_empty_a) == 1:
+        _empty_v[0]["paired_audio"] = _empty_a[0]["url"]
+        _empty_a[0]["paired_video"] = _empty_v[0]["url"]
     return {"items": items, "title": title, "page": url}
 
 

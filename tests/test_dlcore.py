@@ -172,6 +172,15 @@ class TestSafeFilename(unittest.TestCase):
 
 
 class TestRateLimiter(unittest.TestCase):
+    def test_low_rate_elapsed_not_prepaid(self):
+        """v3.1.10: 低速限速不能因预支令牌而瞬间跑完整个数据块。"""
+        lim = dlcore.RateLimiter(256 * 1024)
+        t0 = time.monotonic()
+        lim.consume(256 * 1024)
+        elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.75)
+        self.assertLess(elapsed, 3.0)
+
     def test_unlimited(self):
         lim = dlcore.RateLimiter(0)
         t0 = time.time()
@@ -359,6 +368,202 @@ class TestV318Regression(unittest.TestCase):
             self.assertIsNone(dlcore.find_tmp_dir(tmp, "../evil"))
             self.assertIsNone(dlcore.find_tmp_dir(tmp, "a/b"))
             self.assertIsNone(dlcore.find_tmp_dir(tmp, ""))
+
+
+class TestCompletionConsistency(unittest.TestCase):
+    """v3.1.10：完成可见性、最终产物及后处理的回归测试。"""
+
+    def _manager(self, root):
+        data = os.path.join(root, "data")
+        os.makedirs(data)
+        with open(os.path.join(data, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"download_dir": os.path.join(root, "out"),
+                       "bt_trackers_autoupdate": False}, f)
+        return dlcore.Manager(data_dir=data)
+
+    def _task(self, mgr, root, cls=dlcore.DownloadTask):
+        return cls(mgr, "http://127.0.0.1/item.bin",
+                   os.path.join(root, "out"), "result.bin")
+
+    def test_history_write_failure_never_publicly_done(self):
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            task = self._task(mgr, root)
+            path = os.path.join(root, "out", "result.bin")
+            with open(path, "wb") as f:
+                f.write(b"payload")
+            def fail(_task):
+                raise OSError("simulated history disk failure")
+            mgr.commit_history = fail
+            with self.assertRaises(OSError):
+                task.mark_done(path)
+            self.assertNotEqual(task.state, dlcore.STATE_DONE)
+            self.assertEqual(mgr.history(), [])
+
+    def test_bt_directory_result_uses_actual_file_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            task = self._task(mgr, root, dlcore.BTDownload)
+            bundle = os.path.join(root, "out", "bundle")
+            os.makedirs(os.path.join(bundle, "nested"))
+            files = [os.path.join(bundle, "a.bin"),
+                     os.path.join(bundle, "nested", "b.bin")]
+            for i, path in enumerate(files, 1):
+                with open(path, "wb") as f:
+                    f.write(b"x" * i)
+            task.extra["bt_files"] = files
+            task.mark_done(bundle)
+            self.assertEqual(task.state, dlcore.STATE_DONE)
+            self.assertEqual(task.size, 3)
+            self.assertTrue(os.path.isdir(task.created_final))
+            self.assertEqual(mgr.history()[0]["final"], os.path.abspath(bundle))
+
+    def test_internal_audio_is_not_public_history(self):
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            task = self._task(mgr, root)
+            task.extra["internal"] = True
+            path = os.path.join(root, "out", "result.bin")
+            with open(path, "wb") as f:
+                f.write(b"audio")
+            task.mark_done(path)
+            self.assertEqual(task.state, dlcore.STATE_DONE)
+            self.assertEqual(mgr.history(), [])
+
+    def _make_av_fixture(self, path):
+        """生成含真实视频流和音频流的短媒体，避免无音轨夹具造成假失败。"""
+        import subprocess
+        ffmpeg = os.path.join(dlcore.app_root(), "third_party", "ffmpeg.exe")
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-f", "lavfi", "-i",
+             "testsrc=duration=0.4:size=64x64:rate=5", "-f", "lavfi", "-i",
+             "sine=frequency=880:duration=0.4", "-c:v", "libx264",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", path],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(proc.returncode, 0, proc.stderr[-1000:])
+        probe = subprocess.run(
+            [ffmpeg, "-i", path, "-map", "0:a:0", "-frames:a", "1",
+             "-f", "null", "-"], capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(probe.returncode, 0,
+                         "测试媒体必须包含可解码音频流: " + probe.stderr.decode("utf-8", "replace")[-1000:])
+
+    def _make_video_only_fixture(self, path):
+        """生成**只有视频流、没有音轨**的短媒体（DASH 视频轨的真实形态）。"""
+        import subprocess
+        ffmpeg = os.path.join(dlcore.app_root(), "third_party", "ffmpeg.exe")
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-f", "lavfi", "-i",
+             "testsrc=duration=1.2:size=160x90:rate=10", "-an",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", path],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(proc.returncode, 0, proc.stderr[-1000:])
+        probe = subprocess.run(
+            [ffmpeg, "-i", path, "-map", "0:a:0", "-frames:a", "1",
+             "-f", "null", "-"], capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertNotEqual(probe.returncode, 0, "该夹具必须确实不含音轨")
+
+    def test_audio_only_source_named_mp3_still_extracts(self):
+        """★ v3.1.10 回归（探针 probe-audio-only-path.py：A_DST_SRC_COLLIDE）。
+
+        源文件本身名为 `.mp3` 时（旧版 GUI「仅音频」会预改名成 .mp3），
+        `dst = splitext(src)[0] + ".mp3"` 与 src **同一路径** → FFmpeg 拒绝
+        原地编辑（"Output ... same as Input #0 - exiting"）→ 凡「视频 → 仅音频」
+        必然失败。修复后必须成功产出真实 MP3，且不留坏文件。
+        """
+        import subprocess
+        ffmpeg = os.path.join(dlcore.app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.isfile(ffmpeg):
+            self.skipTest("未提供 FFmpeg")
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            tmp = os.path.join(root, "_fixture.mp4")
+            self._make_av_fixture(tmp)
+            src = os.path.join(root, "video.mp3")   # 同名陷阱现场
+            os.replace(tmp, src)
+            task = self._task(mgr, root)
+            task.extra["audio_only"] = True
+            task.created_final = src
+            task._complete(src)
+            self.assertEqual(task.state, dlcore.STATE_DONE)
+            self.assertTrue(task.created_final.endswith(".mp3"))
+            self.assertTrue(os.path.isfile(task.created_final))
+            # 产物必须是真实可解码的音频（而不是改了后缀的 mp4）
+            probe = subprocess.run(
+                [ffmpeg, "-i", task.created_final, "-map", "0:a:0",
+                 "-frames:a", "1", "-f", "null", "-"],
+                capture_output=True, timeout=60,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.assertEqual(probe.returncode, 0,
+                             "产物必须可解码音频: " + probe.stderr.decode("utf-8", "replace")[-800:])
+            # 临时中转文件不能残留
+            self.assertFalse(os.path.exists(src + ".xzd-avsrc"))
+
+    def test_audio_only_without_track_keeps_downloaded_file(self):
+        """★ v3.1.10：源确实无音轨 → 如实报错，**下载成果必须原样保留**。
+
+        round12 之前的行为是报错同时留下"后缀 .mp3、内容实为 mp4"的坏文件；
+        修复后既要给出可读的中文原因，也不能让下载成果改名或损坏。
+        """
+        ffmpeg = os.path.join(dlcore.app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.isfile(ffmpeg):
+            self.skipTest("未提供 FFmpeg")
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            src = os.path.join(root, "video.mp4")
+            self._make_video_only_fixture(src)
+            before = os.path.getsize(src)
+            task = self._task(mgr, root)
+            task.extra["audio_only"] = True
+            task.created_final = src
+            with self.assertRaises(RuntimeError) as ctx:
+                task._complete(src)
+            self.assertNotEqual(task.state, dlcore.STATE_DONE)
+            self.assertIn("不含音轨", str(ctx.exception))
+            # 下载成果必须原样保留（大小不变、路径不变）
+            self.assertTrue(os.path.isfile(src))
+            self.assertEqual(os.path.getsize(src), before)
+
+    def test_audio_only_history_points_to_existing_mp3(self):
+        ffmpeg = os.path.join(dlcore.app_root(), "third_party", "ffmpeg.exe")
+        if not os.path.isfile(ffmpeg):
+            self.skipTest("未提供 FFmpeg")
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            src = os.path.join(root, "video.mp4")
+            self._make_av_fixture(src)
+            task = self._task(mgr, root)
+            task.extra["audio_only"] = True
+            task.created_final = src
+            task._complete(src)
+            hist = mgr.history()
+            self.assertEqual(task.state, dlcore.STATE_DONE)
+            self.assertTrue(task.created_final.endswith(".mp3"))
+            self.assertTrue(os.path.isfile(task.created_final))
+            self.assertFalse(os.path.exists(src))
+            self.assertEqual(len(hist), 1)
+            self.assertEqual(hist[0]["final"], task.created_final)
+            self.assertEqual(hist[0]["size"], os.path.getsize(task.created_final))
+
+    def test_history_write_failure_preserves_downloaded_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            mgr = self._manager(root)
+            path = os.path.join(root, "out", "result.mp4")
+            self._make_av_fixture(path)
+            task = self._task(mgr, root)
+            task.extra["audio_only"] = True
+            task.created_final = path
+            mgr.commit_history = lambda _task: (_ for _ in ()).throw(OSError("disk full"))
+            with self.assertRaises(OSError):
+                task._complete(path)
+            self.assertNotEqual(task.state, dlcore.STATE_DONE)
+            # 真实抽音轨已成功，故障发生在历史提交；最终 MP3 必须保留。
+            self.assertTrue(task.created_final.endswith(".mp3"))
+            self.assertTrue(os.path.isfile(task.created_final))
+            self.assertEqual(mgr.history(), [])
 
 
 if __name__ == "__main__":

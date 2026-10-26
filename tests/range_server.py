@@ -145,6 +145,16 @@ class RangeServer:
 
             def _resolve(self):
                 path = self.path.split("?", 1)[0]
+                # ★ v3.1.10：真实 HTTP 服务器会把 request-target 里的
+                #   %XX 解码后再路由（RFC 3986）。此前直接拿原始 path 查表，
+                #   导致 `/video%20only.mp4` 查不到 `/video only.mp4` → 404，
+                #   把"夹具不完整"误报成"产品下载失败"。
+                if "%" in path:
+                    try:
+                        from urllib.parse import unquote
+                        path = unquote(path)
+                    except Exception:
+                        pass
                 return srv.files.get(path), srv.headers_map.get(path, {})
 
             def _pre_checks(self):

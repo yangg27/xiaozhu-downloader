@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v3.1.9
+小助下载器 · 图形界面  gui.py   v3.1.10
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -446,20 +446,32 @@ class NewDownloadDialog(Dialog):
             return
         fixed = []
         for u in urls:
-            if os.path.exists(u):
-                # 本地种子文件保持原样
+            if os.path.isfile(u) and u.lower().endswith(".torrent"):
                 fixed.append(u)
             elif u.startswith("magnet:"):
                 fixed.append(u)
-            elif u.lower().startswith(("http://", "https://", "ftp://")):
+            elif u.lower().startswith(("http://", "https://")):
                 fixed.append(u)
             else:
-                fixed.append("http://" + u)
+                messagebox.showwarning(
+                    "地址无效", f"请输入完整的 HTTP/HTTPS 链接、magnet: 磁力链或选择 .torrent 文件：\n{u}",
+                    parent=self)
+                return
+        try:
+            conns = int(self.v_conns.get())
+        except (ValueError, tk.TclError):
+            messagebox.showwarning("线程数无效", "线程数必须是 1-32 的整数。", parent=self)
+            return
+        if not 1 <= conns <= 32:
+            messagebox.showwarning("线程数无效", "线程数必须是 1-32 的整数。", parent=self)
+            return
+        out_dir = self.v_dir.get().strip()
+        if not out_dir:
+            messagebox.showwarning("保存目录无效", "请选择下载文件保存目录。", parent=self)
+            return
         self.result = {
-            "urls": fixed,
-            "url": fixed[0],
-            "out_dir": self.v_dir.get().strip(), "filename": self.v_name.get().strip(),
-            "conns": max(1, min(32, int(self.v_conns.get() or 24))),
+            "urls": fixed, "url": fixed[0], "out_dir": out_dir,
+            "filename": self.v_name.get().strip(), "conns": conns,
             "referer": self.v_ref.get().strip(), "cookie": self.v_cookie.get().strip(),
         }
         self.destroy()
@@ -772,9 +784,8 @@ class SettingsDialog(Dialog):
                                    "已下载的文件和任务记录不会被删除。",
                                    icon="warning"):
             return
-        # 保留当前安装相关状态不在这里处理；Manager 负责把配置写回
+        # 恢复默认只修改本窗口的暂存值；保存/取消统一决定提交或放弃。
         defaults = dict(dlcore.DEFAULT_CFG)
-        self.mgr.set_cfg(**defaults)
         # 刷新界面变量
         self.v_dir.set(defaults.get("download_dir", ""))
         self.v_conns.set(int(defaults.get("connections", 24)))
@@ -791,9 +802,7 @@ class SettingsDialog(Dialog):
                                           "https://cf.trackerslist.com/best.txt"))
         self.v_bt_autoupdate.set(bool(defaults.get("bt_trackers_autoupdate", True)))
         self.v_bt_probe_alive.set(bool(defaults.get("bt_tracker_probe_alive", True)))
-        # 剪贴板监听立即生效
-        if self.app:
-            self.app._clip_enabled = bool(self.v_clipboard.get())
+        # 剪贴板开关与其他设置一样，在点击保存后统一生效。
         # 系统集成保持现状（用户可能只是想重置下载设置）
         messagebox.showinfo("恢复默认设置", "已恢复默认设置，点击“保存”后生效。")
         try:
@@ -952,7 +961,7 @@ class HelpDialog(Dialog):
 """
 
     def __init__(self, master, mgr):
-        super().__init__(master, "帮助", 620, 520, resizable=True, scrollable=True)
+        super().__init__(master, "帮助", 680, 600, resizable=True)
         self.mgr = mgr
         self._build()
 
@@ -1120,7 +1129,22 @@ class WebScanDialog(Dialog):
     """分析网页：由下载器代为抓取页面，列出所有媒体资源"""
 
     def __init__(self, master, app, preset_url: str = ""):
-        super().__init__(master, "分析网页媒体", 720, 460)
+        # ★ v3.1.10 修复（探针 probe-webscan-btn2.py 实证，真实产品缺陷）：
+        #   原尺寸 720x460 装不下自身内容 —— 实测三段需求高度
+        #   top 63 + mid 397（tree height=12）+ bot 63 = **523 > 460**，
+        #   且 resizable=False 不可拉大 → 底部 Frame（"下载视频 / 仅音频 /
+        #   全部下载"三个按钮）被永久挤出可视区：
+        #     探针证据（probe-webscan-btn2.json）：bot Frame 与三个按钮
+        #     全部 winfo_ismapped()=False、winfo_width/height=1x1；
+        #     连续 60 轮 update + 强制 deiconify/lift 均无变化；
+        #     同窗"分析"按钮正常映射（68x39）→ 排除环境/时序因素。
+        #   用户可见后果：分析网页后**无法点"下载视频"/"仅音频"**，
+        #     只能双击行或"全部下载"，功能实质不可用。
+        #   （round9 GUI 实测失败现场：AssertionError: 按钮未映射 '下载视频'）
+        #   修法：① 窗口加高到 540 并同步 tree height 12→9（内容需求降到
+        #         ~430px，留足余量）；② 开放 resizable —— 字号/DPI 差异下
+        #         用户仍可自行拉大，杜绝同类问题复发。
+        super().__init__(master, "分析网页媒体", 760, 540, resizable=True)
         self.app = app
         self.v_url = tk.StringVar(value=preset_url)
         self.items: list[dict] = []
@@ -1142,7 +1166,9 @@ class WebScanDialog(Dialog):
         mid = tk.Frame(self, bg=BG, padx=16)
         mid.pack(fill="both", expand=True)
         cols = ("type", "name", "url")
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=12,
+        # ★ v3.1.10：height 12 → 9 —— 配合窗口加高，确保底部按钮区
+        #   在任何情况下都不会被挤出可视区（详见 __init__ 内的缺陷说明）。
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings", height=9,
                                  selectmode="extended")
         for c, t, w in (("type", "类型", 70), ("name", "文件名", 200), ("url", "地址", 400)):
             self.tree.heading(c, text=t)
@@ -1198,6 +1224,19 @@ class WebScanDialog(Dialog):
         if self.items and self.app:
             page = res.get("page", "")
             self.app.mgr.add_sniff_items(page, self.items)
+            # ★ v3.1.10 修复（GUI 沙盒实测发现）：
+            #   入库后必须立刻刷新主界面嗅探列表。此前只写 Manager，
+            #   依赖主窗口的定时刷新；但定时刷新里 _refresh_sniff 有
+            #   "集合签名未变则跳过重建"的优化，分析对话框关闭后若
+            #   刚好撞上签名未变化/刷新未到点，嗅探页就一直是空的。
+            #   实测现场（gui-v2 round5）：步骤「网页…实际分析」已
+            #   sniff_count=3 入库成功，紧接着切到嗅探页读取
+            #   stree.get_children() 却是 []，导致后续「下载选中」拿不到
+            #   任何行。真实用户会遇到：分析完网页切到嗅探页看不到结果。
+            try:
+                self.app.refresh_now()
+            except Exception:
+                pass
 
     def _dl_sel(self, audio_only: bool = False):
         sel = self.tree.selection()
@@ -1218,12 +1257,41 @@ class WebScanDialog(Dialog):
         for it in items:
             kind = it.get("type") if it.get("type") == "hls" else "auto"
             if audio_only:
-                # 音频模式：文件名加 .mp3 后缀，dlcore 下载后 FFmpeg 抽音轨
+                # 视频才需要 FFmpeg 抽音轨；已有音频直接保存，不能原地重编码。
                 fn = it.get("filename", "")
-                if not fn.lower().endswith(".mp3"):
-                    fn = os.path.splitext(fn)[0] + ".mp3"
-                self.app.mgr.add_task(it["url"], referer=page, filename=fn,
-                                      kind=kind, extra={"audio_only": True})
+                is_audio = it.get("type") == "audio" or fn.lower().endswith(
+                    (".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"))
+                if is_audio:
+                    self.app.mgr.add_task(it["url"], referer=page, filename=fn, kind=kind)
+                elif it.get("paired_audio"):
+                    # ★ v3.1.10 修复（真实站点普遍形态）：分析网页时已识别出
+                    #   该视频的**独立音频轨**（DASH/YouTube 适配流的常态，
+                    #   视频轨本身不含音轨）。既然目标就是音频，直接下那条
+                    #   音频轨 —— 既省流量又不会撞上"源无音轨 → 抽轨必然失败"。
+                    #   仅音频轨拉不到时（极其少见），仍可改点「下载视频」合并。
+                    aurl = it["paired_audio"]
+                    # 成品名：沿用视频基名 + 音频轨扩展名（真实站点音频轨常是
+                    # `.m4s`/无扩展名的签名链接，直接用 URL 尾名会很难认）。
+                    aext = os.path.splitext(aurl.split("?")[0])[1].lower()
+                    if aext not in (".mp3", ".m4a", ".aac", ".opus", ".ogg",
+                                    ".flac", ".wav"):
+                        aext = ".m4a"
+                    afn = os.path.splitext(fn)[0] + aext if fn else ""
+                    self.app.mgr.add_task(aurl, referer=page, filename=afn, kind="auto")
+                else:
+                    # ★ v3.1.10 修复（探针 probe-audio-only-path.py 实证，真实产品缺陷）：
+                    #   原实现先把任务文件名改成 `base + ".mp3"` 再下载，而
+                    #   `_extract_audio()` 的输出路径也是 `splitext(src)[0] + ".mp3"`
+                    #   → **两者同一路径**，FFmpeg 拒绝原地编辑（决定性证据：
+                    #     "Output ... same as Input #0 - exiting" /
+                    #     "FFmpeg cannot edit existing files in-place."）→
+                    #   凡「视频 → 仅音频」必然失败，目录里还留下后缀 .mp3、
+                    #   内容实为 mp4 的坏文件（round12 实测现场）。
+                    #   修法：**保持原始文件名下载**（.mp4），让抽音轨输出
+                    #   自然落在 base.mp3 —— 完成后任务显示的文件名依然是
+                    #   .mp3（mark_done 以最终交付物为准），用户预期不变。
+                    self.app.mgr.add_task(it["url"], referer=page, filename=fn,
+                                          kind=kind, extra={"audio_only": True})
             else:
                 # 视频模式：检查是否有配对音频，有则标记合并
                 extra = {}
@@ -1279,6 +1347,9 @@ class App:
         self._last_speed_txt = "\u0000"
         self._last_status_txt = "\u0000"
         self._last_tab_txt = ("\u0000", "\u0000")
+        # v3.1.10：操作反馈保护窗（见 flash_status）。刷新期间不覆盖它，
+        #   否则"已为 N 个任务增加 K 个线程"这类确认信息会被立刻冲掉。
+        self._status_flash: tuple | None = None
         # 托盘相关先占位，避免刷新回调提前访问
         self.tray = None
         self._tray_state = "normal"
@@ -1316,6 +1387,10 @@ class App:
 
         # ---- 剪贴板监听（复制 URL 自动弹新建下载）----
         self._clip_last = ""
+        # v3.1.10：剪贴板弹窗重入标志，防止 wait_window 期间递归再弹一个
+        self._clip_dialog_busy = False
+        # v3.1.10：新建下载对话框全局互斥（new_download 唯一入口处生效）
+        self._new_dialog_open = False
         self._clip_enabled = self.mgr.cfg.get("clipboard_watch", True)
         self._clip_native = None
         self._clip_fallback_thread = None
@@ -1549,7 +1624,8 @@ class App:
                 return
             except Exception:
                 self._help_dialog = None
-        self._help_dialog = HelpDialog(self.root, self.mgr)
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(self.root, self.mgr)
         self._help_dialog.protocol("WM_DELETE_WINDOW", self._on_help_close)
 
     def _on_help_close(self):
@@ -1650,6 +1726,34 @@ class App:
     def refresh_now(self):
         self._do_refresh()
 
+    def flash_status(self, text: str, seconds: float = 6.0):
+        """操作反馈：写入状态栏，并在 seconds 秒内不被定时刷新覆盖。
+
+        ★ v3.1.10 修复（GUI 沙盒实测发现，真实产品缺陷）：
+          各处操作反馈（"已为 N 个任务增加 K 个线程"、"已用 aria2c 重试 N 个任务"、
+          "已清除 N 个已完成任务"…）都是**先写状态栏、紧接着调用 refresh_now()**，
+          而 refresh_now → _refresh_common 会用"任务 N 个 · 下载中 X · 排队 Y · 总进度 …"
+          整体覆盖同一行文本 —— 用户实际根本看不到操作确认，只看到一闪而过或
+          直接看不到。实测证据（gui-v2 round7）：
+            · "加线程实际改变目标和请求数" 断言 lbl_status 含"增加 8 个线程" → 失败
+            · "真实 aria2c 工具栏重试与下载" 断言含"aria2c 重试" → 失败
+          两处都是同一根因：刷新把反馈立刻冲掉了。真实用户点"增加 8 个线程"
+          后状态栏没有任何确认，无法判断操作是否生效。
+          修法：反馈走 flash_status，刷新期间给它一个不被覆盖的时间窗。
+        """
+        self._status_flash = (text, time.monotonic() + float(seconds))
+        try:
+            self.lbl_status.config(text=text)
+        except Exception:
+            dlcore.LOG.debug('忽略异常：flash_status 写状态栏')
+
+    def _status_flash_active(self) -> bool:
+        """当前是否处于操作反馈保护窗口内。"""
+        flash = getattr(self, "_status_flash", None)
+        if not flash:
+            return False
+        return time.monotonic() < flash[1]
+
     def _do_refresh(self):
         # v1.9.0：窗口不可见（纯托盘后台）时，跳过一切"画界面"的工作。
         #   为什么要跳过：Treeview 的 item/insert/delete 会触发 Tk 的几何计算与
@@ -1725,7 +1829,14 @@ class App:
 
         # 嗅探标签：仅在**条目集合**变化时重建（原来每轮 400 行全量 delete+insert）
         items = self.mgr.sniff_items[:400]
-        sig = (len(items), items[0]["url"] if items else "", items[-1]["url"] if items else "")
+        # ★ v3.1.10 修复（GUI 沙盒实测发现）：
+        #   旧的签名只取 (条数, 首项URL, 末项URL)，中间项变化会被漏判 ——
+        #   例如先有 {A,B,C} 再插入 D 成为 {A,B,C,D} 时条数已变（能判出），
+        #   但「尾部替换」这类变动（{A,B,C} → {A,B,X}，条数不变、首项不变、
+        #   末项变了确实能判出；而 {A,B,C} → {A,X,C} 则三项全不变）会漏刷，
+        #   表现为嗅探页显示陈旧数据。改为对所有 URL 取稳定哈希，任何
+        #   成员变化都能识别，代价只是每轮一次字符串拼接。
+        sig = (len(items), hash("\u0000".join(it["url"] for it in items)))
         if self._sniff_sig != sig or len(self.stree.get_children()) != len(items):
             self._sniff_sig = sig
             self.stree.delete(*self.stree.get_children())
@@ -1790,7 +1901,7 @@ class App:
         t_status = (f"任务 {len(snaps)} 个 · 下载中 {act} · 排队 {wait}"
                     + (f" · 总进度 {overall}" if overall else "")
                     + f" · {api_txt} · 完全离线运行")
-        if t_status != self._last_status_txt:
+        if t_status != self._last_status_txt and not self._status_flash_active():
             self._last_status_txt = t_status
             self.lbl_status.config(text=t_status)
         # 标签页标题带数量
@@ -1840,25 +1951,48 @@ class App:
 
     # ---------- 动作 ----------
     def new_download(self, preset=None):
-        """v3.1.0：统一新建下载入口（HTTP/磁力/种子）。"""
-        d = NewDownloadDialog(self.root, self.mgr, preset)
-        self.root.wait_window(d)
-        if not d.result:
+        """v3.1.0：统一新建下载入口（HTTP/磁力/种子）。
+
+        ★ v3.1.10 修复（GUI 沙盒实测发现，最终定位）：
+        必须在这里做模态重入保护，而不是只在剪贴板轮询里判。
+        线程栈证据（gui-v2-step-timeout-threads.txt）：
+            外层  new_download → wait_window   ← 驱动/用户点「+ 新建下载」
+            内层  _clipboard_poll → _on_clip_url → new_download → wait_window
+        内层之所以能进来，是因为 NewDownloadDialog **刚创建、尚未 mapped**
+        的那几毫秒里 winfo_viewable() 仍为 0，_has_modal_dialog() 判不出来；
+        而 wait_window 已在跑事件循环，剪贴板轮询的 after(0) 回调正好落在
+        这个窗口期。两个模态框互相等待后事件循环再也不推进，界面永久冻结
+        （实测 20s/60s 都被看门狗强杀）。
+        唯一入口加锁最可靠：无论从工具栏、右键菜单、剪贴板还是 xzd:// 进来，
+        只要已有一个新建对话框在等，就不再开第二个。
+        """
+        if self._new_dialog_open:
+            return None
+        self._new_dialog_open = True
+        try:
+            d = NewDownloadDialog(self.root, self.mgr, preset)
+            self.root.wait_window(d)
+        finally:
+            self._new_dialog_open = False
+        if d.result is None:
             return
         r = d.result
         urls = r.get("urls", [r["url"]])
-        for u in urls:
-            kind = dlcore.kind_of_url(u)
-            # 磁力和本地种子直接走 bt；http .torrent 先交给 aria2c 自动处理
-            if kind == "bt":
-                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
-                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
-                                  kind="bt")
-            else:
-                self.mgr.add_task(u, out_dir=r["out_dir"], filename=r["filename"],
-                                  conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
-                                  kind="auto")
+        tasks = []
+        try:
+            for index, u in enumerate(urls):
+                kind = dlcore.kind_of_url(u)
+                # 批量链接共用一个文件名会互相覆盖；保留第一条指定名，其余自动命名。
+                filename = r["filename"] if index == 0 else ""
+                tasks.append(self.mgr.add_task(
+                    u, out_dir=r["out_dir"], filename=filename,
+                    conns=r["conns"], referer=r["referer"], cookie=r["cookie"],
+                    kind="bt" if kind == "bt" else "auto"))
+        except Exception as exc:
+            messagebox.showerror("创建下载失败", str(exc), parent=self.root)
         self.refresh_now()
+        self.flash_status(f"已加入 {len(tasks)} 个下载任务")
+        return tasks
 
     def _paste_url(self):
         """v3.1.0：粘贴链接 → 打开统一新建对话框并自动填入。"""
@@ -1896,7 +2030,7 @@ class App:
                 if self.mgr.add_connections(t, k):
                     n += 1
         if n:
-            self.lbl_status.config(text=f"已为 {n} 个任务增加 {k} 个线程")
+            self.flash_status(f"已为 {n} 个任务增加 {k} 个线程")
         else:
             messagebox.showinfo("提示", "请选中正在下载的任务（HLS 已完成分片并行，无需加速）",
                                 parent=self.root)
@@ -1918,7 +2052,7 @@ class App:
             else:
                 skipped += 1
         if n:
-            self.lbl_status.config(text=f"已用 aria2c 重试 {n} 个任务")
+            self.flash_status(f"已用 aria2c 重试 {n} 个任务")
         else:
             messagebox.showinfo("提示", "请选中出错或已暂停的任务后再点「aria2c 极速重试」\n"
                                 "该通道使用软件内置的 aria2c，无需额外安装。",
@@ -1941,7 +2075,7 @@ class App:
             if s["state"] == dlcore.STATE_DONE:
                 self.mgr.remove_task(s["tid"])
                 n += 1
-        self.lbl_status.config(text=f"已清除 {n} 个已完成任务（文件保留）")
+        self.flash_status(f"已清除 {n} 个已完成任务（文件保留）")
         self.refresh_now()
 
     def copy_selected_url(self):
@@ -1952,7 +2086,7 @@ class App:
         if t:
             self.root.clipboard_clear()
             self.root.clipboard_append(t.url)
-            self.lbl_status.config(text="下载链接已复制到剪贴板")
+            self.flash_status("下载链接已复制到剪贴板")
 
     def jump_selected(self):
         """v3.0.8: 把选中任务提到队列最前（插队）。"""
@@ -1964,7 +2098,7 @@ class App:
             if self.mgr.jump_queue(tid):
                 n += 1
         if n:
-            self.lbl_status.config(text=f"已插队 {n} 个任务到最前")
+            self.flash_status(f"已插队 {n} 个任务到最前")
         self.refresh_now()
 
     def _open_selected(self):
@@ -2059,7 +2193,7 @@ class App:
             n += 1
         self.nb.select(0)
         self.refresh_now()
-        self.lbl_status.config(text=f"已加入下载队列：{n} 个任务")
+        self.flash_status(f"已加入下载队列：{n} 个任务")
 
     def open_settings(self):
         SettingsDialog(self.root, self.mgr)
@@ -2194,6 +2328,18 @@ class App:
         任务时才跳过；已取消/已失败/已完成的 URL 再次复制仍会触发弹窗，
         让用户重新确认是否下载。
         """
+        # ★ v3.1.10 修复（GUI 沙盒实测发现，二次定位）：
+        #   模态保护必须能挡住"递归自嵌套"，只查 NewDownloadDialog 是不够的 ——
+        #   new_download() 内部走 wait_window()，而 wait_window 会继续跑事件
+        #   循环，剪贴板轮询在那期间再次触发，此刻对话框**已经存在**却仍会
+        #   进入 new_download() 再开一个（栈证据 _clipboard_poll →
+        #   _on_clip_url → new_download 嵌套在自己里面）。
+        #   实测后果：两个模态框互相等待，事件循环再也不推进，整个界面永久
+        #   冻结（20s / 60s 超时都被看门狗强杀）。真实用户同样会撞上：对话框
+        #   开着时复制一个下载链接即可冻结界面。
+        #   现在用重入标志 + 任意对话框存在双重判据，任何一层都不会再进。
+        if self._clip_dialog_busy or self._has_modal_dialog():
+            return
         try:
             txt = self.root.clipboard_get().strip()
         except Exception:
@@ -2207,7 +2353,29 @@ class App:
             return
         if self._clip_url_already_active(txt):
             return
-        self._on_clip_url(txt)
+        self._clip_dialog_busy = True
+        try:
+            self._on_clip_url(txt)
+        finally:
+            self._clip_dialog_busy = False
+
+    def _has_modal_dialog(self) -> bool:
+        """是否有模态对话框正开着（新建下载 / 设置 / 等其它 Dialog）。
+
+        判据用 winfo_viewable()：对话框 withdrawn 或已 destroy 时返回 0，
+        避免把"刚关闭但对象还在"误判成仍在打开。
+        """
+        try:
+            for w in self.root.winfo_children():
+                if isinstance(w, Dialog):
+                    try:
+                        if w.winfo_exists() and w.winfo_viewable():
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            return False
+        return False
 
     @staticmethod
     def _is_clipboard_download_url(txt: str) -> bool:
