@@ -19,6 +19,9 @@
     安装目录根目录不再保留图标文件。
   · third_party/aria2/ 内置 aria2c.exe + N_m3u8DL-RE.exe（v2.6.0），
     安装包自包含，用户无需额外安装即可使用 aria2c 备用极速通道。
+  · third_party/ffmpeg.exe（v3.1.10 起）—— HLS 的 ts→mp4 无损转封装、
+    「仅音频」抽轨、自动/手动音视频合并都依赖它。此前漏打，导致
+    **打包版这四个功能静默失效**（源码运行却正常）。
 
 体积取舍（实测）：
   · Pillow  7.0 MB  → 带。托盘「下载中/出错/暂停」三色图标靠它生成；
@@ -27,6 +30,8 @@
                        没有它会退化到纯 Python AES（慢 20~50 倍，拖垮 m3u8 下载）。
   · aria2c 5.4 MB + N_m3u8DL-RE 16.4 MB → 带。v2.6.0 备用极速通道必需，
                        安装后即可直接用，不再依赖外部安装。
+  · ffmpeg.exe 58.2 MB → 带（v3.1.10 起）。HLS 转 mp4 / 音频提取 /
+                       音视频合并的唯一依赖，缺它则功能静默失效。
   · numpy/pandas/matplotlib/pip/setuptools → **排除**（与本程序毫无关系，
                        不带它们能省 120MB+）。
 """
@@ -55,6 +60,23 @@ a = Analysis(
         (os.path.join(ROOT, "_assets", "tray.ico"), "."),
         # v2.6.0：内置 aria2c + N_m3u8DL-RE，安装包自包含，无需用户安装
         (os.path.join(ROOT, "third_party", "aria2"), "third_party/aria2"),
+        # ★ v3.1.10 修复（探针 probe-frozen-ffmpeg.py 实证，真实产品缺陷）：
+        #   ffmpeg.exe 此前**从未被打包** —— `datas` 只有 aria2 一项，
+        #   而 `app_root()` 在 frozen 下返回 exe 同级的 `_internal/`，
+        #   `third_party/ffmpeg.exe` 在那里不存在 → **四处功能静默失效**：
+        #     · `_remux_to_mp4()`   找不到就 `return`（完全静默）
+        #     → HLS 的 ts 无损转 mp4 不执行，交付物停在 .ts
+        #     · `_extract_audio()`  → 抛"缺少 FFmpeg，无法提取音频"
+        #     · `_merge_with_audio()` → 抛"缺少 FFmpeg，无法合并音视频"
+        #     · `merge_av()`（手动合并窗口）→ 报缺少 FFmpeg
+        #   用户可见后果（frozen 实测）：HLS 任务拿到的是
+        #     `smoke stream.ts` 而不是 `.mp4`；「仅音频」「音视频合并」
+        #     在装好的正式版里直接不可用 —— 而源码运行时一切正常，
+        #     只有打包版才坏（最典型的一类"打包遗漏"）。
+        #   代价：安装包 +60MB（ffmpeg.exe 60,993,536 字节）。
+        #   取舍：这三个功能是本产品的核心卖点之一（HLS/B站/YouTube
+        #     视频站点下载），不能为了体积把它砍掉。
+        (os.path.join(ROOT, "third_party", "ffmpeg.exe"), "third_party"),
     ],
     hiddenimports=[
         # gui.py 内部有惰性 import（import tray / import sysintegration），

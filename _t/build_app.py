@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if os.path.basename(ROOT) == "_t":
@@ -63,17 +64,22 @@ def run():
     #   一是它会触发工作区的"批量删除安全策略"（要删 900+ 个文件，远超阈值），
     #   导致整个构建在最后一步被拦下、必须人工接手；
     #   二是改名归档比直接删除更安全（构建出问题还能回退对比）。
+    # ★ v3.1.10：归档名带时间戳，**绝不删除既有归档**。
+    #   原实现先 `rmtree(archive)` 再 rename 到固定名 —— 既踩安全策略
+    #   （实测 `SAFE_DELETE_BULK_CONFIRM_REQUIRED count=987`），
+    #   又在"归档已存在"时把整个构建卡在最后一步。改为每次一个新名字，
+    #   归档只增不删（定期由人工清理即可）。
     if os.path.exists(DIST):
-        archive = os.path.join(os.path.dirname(DIST), "_old_产物归档")
+        archive = os.path.join(os.path.dirname(DIST),
+                               "_old_产物归档_%d" % int(time.time()))
         try:
-            if os.path.isdir(archive):
-                import shutil as _sh
-                _sh.rmtree(archive, ignore_errors=True)
             os.rename(DIST, archive)
             print(f"[build_app] 旧产物已归档: {os.path.basename(archive)}")
-        except OSError:
-            # 改名失败（如目录被占用）才退回删除
-            shutil.rmtree(DIST, ignore_errors=True)
+        except OSError as exc:
+            # 改名失败（如目录被占用）时**不删除**，如实报错让人处理。
+            print(f"[build_app] 旧产物归档失败（未删除，请手动处理）: {exc}",
+                  file=sys.stderr)
+            sys.exit(4)
     os.makedirs(os.path.dirname(DIST), exist_ok=True)
     shutil.move(DIST_SRC, DIST)
 
