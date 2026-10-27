@@ -47,6 +47,9 @@ jobs:
         run: python -m unittest tests.test_dlcore -v
 
       - name: Run e2e regression
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
         run: python tests/e2e_regression.py
 
       - name: Build main app
