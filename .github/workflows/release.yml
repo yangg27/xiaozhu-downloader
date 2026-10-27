@@ -36,7 +36,12 @@ jobs:
           python -c "import PIL; print('PIL OK:', PIL.__version__)"
 
       - name: Verify version alignment
-        run: python _t/check_version.py
+        env:
+          PYTHONIOENCODING: utf-8
+        shell: pwsh
+        run: |
+          chcp 65001
+          python _t/check_version.py
 
       - name: Run unit tests
         run: python -m unittest tests.test_dlcore -v
