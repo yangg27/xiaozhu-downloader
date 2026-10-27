@@ -53,7 +53,7 @@ import uuid
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.10"
+ENGINE_VERSION = "3.1.11"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

@@ -7,6 +7,9 @@ dist_app/
 dist_setup/
 *.spec.bak
 
+# ---- 多智能体复测证据 ----
+.agent-runs/
+
 # ---- 开发/测试目录（不随源码发布）----
 # 构建脚本现在随仓库发布，供 GitHub Actions 使用
 # _t/

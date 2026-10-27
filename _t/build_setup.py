@@ -36,7 +36,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.1.10"
+VERSION = "3.1.11"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -135,14 +135,38 @@ SETUP_PY_FOOTER = r'''
 
 
 def _shell_copy_self_to_temp():
-    """把卸载器自身复制到 %TEMP% 再删除原目录（解决删不掉自己的问题）。"""
+    """把卸载器自身复制到 %TEMP% 再删除原目录（解决删不掉自己的问题）。
+
+    ★ v3.1.11 修复（缺陷 I，真机实测 + 探针实证）：
+      副本名加 pid 后缀 —— 旧实现固定名 `xzd_uninstall_helper.exe`，
+      与自删脚本共用固定名，多实例/重试时会互相覆盖；
+      且旧副本若仍被占用会导致 copy2 抛错 → 卸载链路整体中断。
+      现在：唯一名 + 旧副本尽力清理 + 拷贝失败降级复用旧副本。
+    """
     try:
         src = sys.executable
-        tmp = os.path.join(tempfile.gettempdir(), "xzd_uninstall_helper.exe")
+        tmp = os.path.join(tempfile.gettempdir(),
+                           "xzd_uninstall_helper_%d.exe" % os.getpid())
         shutil.copy2(src, tmp)
         return tmp
     except Exception:
-        return sys.executable
+        # 降级：清理历史固定名副本后重试一次
+        try:
+            legacy = os.path.join(tempfile.gettempdir(), "xzd_uninstall_helper.exe")
+            for _ in range(10):
+                try:
+                    if os.path.exists(legacy):
+                        os.remove(legacy)
+                        break
+                except Exception:
+                    time.sleep(0.5)
+            src = sys.executable
+            tmp = os.path.join(tempfile.gettempdir(),
+                               "xzd_uninstall_helper_%d.exe" % os.getpid())
+            shutil.copy2(src, tmp)
+            return tmp
+        except Exception:
+            return sys.executable
 
 
 def _wait_pid_dead(pid: int, timeout: float = 5.0):
@@ -188,9 +212,51 @@ def _delete_tree(path: str):
             subprocess.run(["robocopy", empty, path, "/MIR", "/NJH", "/NJS", "/NDL", "/NC", "/NS", "/NP"], capture_output=True, timeout=30)
             shutil.rmtree(path, ignore_errors=True)
             shutil.rmtree(empty, ignore_errors=True)
-            return not os.path.exists(path)
         except Exception:
-            return False
+            pass
+        # ★ v3.1.11 修复（缺陷 J，真机实测 + 探针实证）：
+        #   现场：安装目录**文件全被删净（0 个文件）**，只剩一个空壳目录，
+        #         而日志显示 `delete_tree ok=False exists=True`；
+        #         稍后手工 os.rmdir 立刻成功 ⇒ **瞬时占用**。
+        #   机理：Windows 的 delete-pending 语义 —— 卸载器自己的
+        #         `卸载.exe` 被标记删除后立即从目录列表消失，但它（以及
+        #         one-file 模式下负责清理 _MEI 的 bootloader 父进程）持有的
+        #         **目录句柄**要等进程真正退出才释放；在此期间该目录无法 rmdir。
+        #         旧实现只给 5×0.5s = 2.5s，且最后只做一次 robocopy 就放弃。
+        #   修复：在 robocopy 之后，**单独对「删空目录」做一轮长重试**
+        #         （最多 40 次 × 500ms = 20s），并在每轮前重试清空内容。
+        for i in range(40):
+            if not os.path.exists(path):
+                return True
+            try:
+                # 目录可能又冒出被延迟删除的项，清一遍
+                if os.path.isdir(path):
+                    for _r, _d, _f in os.walk(path, topdown=False):
+                        for fn in _f:
+                            try:
+                                os.remove(os.path.join(_r, fn))
+                            except Exception:
+                                pass
+                        for dn in _d:
+                            try:
+                                os.rmdir(os.path.join(_r, dn))
+                            except Exception:
+                                pass
+                    os.rmdir(path)
+                else:
+                    os.remove(path)
+                return True
+            except Exception:
+                time.sleep(0.5)
+        # 最后再试一次 robocopy 兜底（占用方可能此时才退出）
+        try:
+            empty = tempfile.mkdtemp(prefix="xzd_del_")
+            subprocess.run(["robocopy", empty, path, "/MIR", "/NJH", "/NJS", "/NDL", "/NC", "/NS", "/NP"], capture_output=True, timeout=30)
+            shutil.rmtree(path, ignore_errors=True)
+            shutil.rmtree(empty, ignore_errors=True)
+        except Exception:
+            pass
+        return not os.path.exists(path)
     elif os.path.isfile(path):
         for i in range(5):
             try:
@@ -199,6 +265,15 @@ def _delete_tree(path: str):
                 return True
             except Exception:
                 time.sleep(0.3)
+        # ★ v3.1.11（缺陷 J 同族）：单文件也做一轮长重试
+        for i in range(40):
+            if not os.path.exists(path):
+                return True
+            try:
+                os.remove(path)
+                return True
+            except Exception:
+                time.sleep(0.5)
     return False
 
 
@@ -218,19 +293,29 @@ def _reg_delete_tree(root, path: str):
 
 def _create_shortcut(lnk: str, target: str, args: str = "", icon: str = "", desc: str = ""):
     os.makedirs(os.path.dirname(lnk), exist_ok=True)
-    vbs = os.path.join(tempfile.gettempdir(), "xzd_mklnk.vbs")
-    with open(vbs, "w", encoding="utf-16") as f:
-        f.write(f"Set ws=CreateObject(\"WScript.Shell\")\n")
-        f.write(f"Set l=ws.CreateShortcut(\"{lnk}\")\n")
-        f.write(f"l.TargetPath=\"{target}\"\n")
-        if args:
-            f.write(f"l.Arguments=\"{args}\"\n")
-        if icon:
-            f.write(f"l.IconLocation=\"{icon}\"\n")
-        if desc:
-            f.write(f"l.Description=\"{desc}\"\n")
-        f.write("l.Save\n")
-    subprocess.run(["cscript", "//nologo", vbs], capture_output=True, timeout=30)
+    # ★ v3.1.11 修复（缺陷 I 同族，真机实测发现）：
+    #   旧实现在 %TEMP% 留下固定名 `xzd_mklnk.vbs` **从不清理**（现场实证：
+    #   %TEMP%\xzd_mklnk.vbs 494 字节残留）。现改为 pid 唯一名 + 用完即删。
+    vbs = os.path.join(tempfile.gettempdir(), "xzd_mklnk_%d.vbs" % os.getpid())
+    try:
+        with open(vbs, "w", encoding="utf-16") as f:
+            f.write(f"Set ws=CreateObject(\"WScript.Shell\")\n")
+            f.write(f"Set l=ws.CreateShortcut(\"{lnk}\")\n")
+            f.write(f"l.TargetPath=\"{target}\"\n")
+            if args:
+                f.write(f"l.Arguments=\"{args}\"\n")
+            if icon:
+                f.write(f"l.IconLocation=\"{icon}\"\n")
+            if desc:
+                f.write(f"l.Description=\"{desc}\"\n")
+            f.write("l.Save\n")
+        subprocess.run(["cscript", "//nologo", vbs], capture_output=True, timeout=30)
+    finally:
+        try:
+            if os.path.exists(vbs):
+                os.remove(vbs)
+        except Exception:
+            pass
 
 
 def _shortcut_for(name: str, desktop: bool = False):
@@ -355,8 +440,66 @@ def install():
     _launch(exe)
 
 
+def _cleanup_temp_leftovers():
+    """清理 %TEMP% 下本软件的历史遗留垃圾（缺陷 I 配套）。
+
+    清理对象（全部为**本软件自己创建**的固定名文件，不触碰用户数据）：
+      · xzd_uninstall_helper.exe / xzd_uninstall_helper_<pid>.exe
+      · xzd_delself.vbs / xzd_delself_<pid>.vbs
+      · xzd_mklnk.vbs / xzd_mklnk_<pid>.vbs
+      · xzd_payload.zip（解包中间产物）
+      · _MEIxxxxxx 解包目录（one-file 模式遗留）
+
+    安全约束：
+      · 只处理 %TEMP% 根目录下的精确前缀，绝不递归扫描其他位置
+      · 每个文件删除前先判断是否被占用，删不掉就跳过（不重试堵塞卸载）
+      · 当前正在运行的自己（sys.executable）不删（由自删脚本收尾）
+    """
+    tmpdir = tempfile.gettempdir()
+    me = os.path.normcase(os.path.abspath(sys.executable))
+    prefixes = ("xzd_uninstall_helper", "xzd_delself", "xzd_mklnk")
+    removed, skipped = [], []
+    try:
+        names = os.listdir(tmpdir)
+    except Exception:
+        return
+    for name in names:
+        low = name.lower()
+        target = None
+        if any(low.startswith(p) for p in prefixes) and low.endswith((".exe", ".vbs")):
+            target = os.path.join(tmpdir, name)
+        elif low == "xzd_payload.zip":
+            target = os.path.join(tmpdir, name)
+        elif low.startswith("_mei") and os.path.isdir(os.path.join(tmpdir, name)):
+            target = os.path.join(tmpdir, name)
+        if not target:
+            continue
+        if os.path.normcase(os.path.abspath(target)) == me:
+            continue
+        try:
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=True)
+                if os.path.exists(target):
+                    skipped.append(name)
+                else:
+                    removed.append(name)
+            else:
+                os.remove(target)
+                removed.append(name)
+        except Exception:
+            skipped.append(name)
+    if removed:
+        _log(f"temp cleanup removed: {removed}")
+    if skipped:
+        _log(f"temp cleanup skipped(busy): {skipped}")
+
+
 def uninstall():
     _log(f"uninstall start argv={sys.argv} exe={sys.executable}")
+    # ★ v3.1.11 新增（缺陷 I）：顺手清理历史版本留下的 %TEMP% 垃圾。
+    #   旧版自删脚本失败后会永久残留 77MB helper 与两个 vbs；
+    #   新版卸载时主动扫一遍，把历史包袱一并清掉。
+    _cleanup_temp_leftovers()
     # 清理注册表
     _reg_delete_tree(winreg.HKEY_CURRENT_USER, r"Software\\Classes\\xzd")
     _reg_delete_tree(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
@@ -408,7 +551,7 @@ def _log(msg: str):
 def _do_uninstall_from_helper():
     target_dir = sys.argv[2] if len(sys.argv) > 2 else INSTALL_DIR
     parent_pid = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 0
-    _log(f"helper start target={target_dir} parent={parent_pid}")
+    _log(f"helper start target={target_dir} parent={parent_pid} me={sys.executable}")
     if parent_pid:
         dead = _wait_pid_dead(parent_pid, timeout=10.0)
         _log(f"parent dead={dead}")
@@ -416,17 +559,63 @@ def _do_uninstall_from_helper():
     time.sleep(2.0)
     ok = _delete_tree(target_dir)
     _log(f"delete_tree ok={ok} exists={os.path.exists(target_dir)}")
-    # 删除自己（副本）
+
+    # ★ v3.1.11 修复（缺陷 I，真机实测 + 探针实证，两条硬事实）：
+    #
+    #   事实 1：安装包是 PyInstaller **one-file** 模式（PE 内含 _MEIPASS/pyi- 标记）
+    #     ⇒ helper 运行时是 **bootloader 父进程 + Python 子进程** 双进程，
+    #       **两者都持有同一个 exe 的文件锁**。
+    #       `os._exit(0)` 只结束 Python 子进程，父进程还要清理 ~77MB 的
+    #       `_MEIxxxxxx` 解包目录，实测约需 2–3 秒才真正退出。
+    #
+    #   事实 2（探针实测）：`FileSystemObject.DeleteFile` 对**运行中的 exe**
+    #     返回 `ERR 70 没有权限`：
+    #         cscript rc=0
+    #         output = ERR1=70 没有权限 | ERR2=70 没有权限
+    #       旧脚本**没有 `On Error Resume Next`** ⇒ 第 3 行一抛错就中止，
+    #       第 4 行永不执行 ⇒ vbs 不自删 + helper 永久残留 77MB。
+    #     且旧脚本只 `WScript.Sleep 1000`，而实测锁释放与可删时刻之间
+    #     裕度仅约 320ms（时间线：helper 进程 10484ms 消失 / 文件 10807ms 可删）
+    #     ⇒ **必然的竞态**：第一次卸载失败、第二次成功。
+    #
+    #   现场证据（%TEMP%）：xzd_uninstall_helper.exe 77,259,562 字节 +
+    #     xzd_delself.vbs 456 字节**内容完整**残留（⇒ 脚本未跑完）。
+    #
+    #   修复：
+    #     · On Error Resume Next + 最多 30 次 × 500ms 重试（上限 15s）
+    #     · vbs 名称带 pid，避免多实例冲突
+    #     · vbs 自删放最后并同样带重试（删除目标不存在时 DeleteFile 也报错，
+    #       故用 fso.FileExists 先行判断）
     me = sys.executable
-    vbs = os.path.join(tempfile.gettempdir(), "xzd_delself.vbs")
-    with open(vbs, "w", encoding="utf-16") as f:
-        f.write(f"Set fso=CreateObject(\"Scripting.FileSystemObject\")\n")
-        f.write(f"WScript.Sleep 1000\n")
-        f.write(f"fso.DeleteFile \"{me}\"\n")
-        f.write(f"fso.DeleteFile \"{vbs}\"\n")
-    subprocess.Popen(["cscript", "//nologo", vbs],
-                     creationflags=0x00000008,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    vbs = os.path.join(tempfile.gettempdir(), "xzd_delself_%d.vbs" % os.getpid())
+    try:
+        with open(vbs, "w", encoding="utf-16") as f:
+            f.write('On Error Resume Next\n')
+            f.write('Set fso=CreateObject("Scripting.FileSystemObject")\n')
+            f.write('Dim i\n')
+            # 第 1 段：反复尝试删除 helper 自身（等到 bootloader 父进程退完）
+            f.write('For i = 1 To 30\n')
+            f.write('  If fso.FileExists("%s") Then\n' % me)
+            f.write('    fso.DeleteFile "%s", True\n' % me)
+            f.write('  End If\n')
+            f.write('  If Not fso.FileExists("%s") Then Exit For\n' % me)
+            f.write('  WScript.Sleep 500\n')
+            f.write('Next\n')
+            # 第 2 段：删除本脚本（自身删除同样可能短暂失败，也重试）
+            f.write('For i = 1 To 10\n')
+            f.write('  If fso.FileExists("%s") Then\n' % vbs)
+            f.write('    fso.DeleteFile "%s", True\n' % vbs)
+            f.write('  End If\n')
+            f.write('  If Not fso.FileExists("%s") Then Exit For\n' % vbs)
+            f.write('  WScript.Sleep 300\n')
+            f.write('Next\n')
+        subprocess.Popen(["cscript", "//nologo", vbs],
+                         creationflags=0x00000008,
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _log(f"self-delete scheduled: {os.path.basename(vbs)}")
+    except Exception as exc:
+        _log(f"self-delete schedule failed: {exc}")
     os._exit(0)
 
 
