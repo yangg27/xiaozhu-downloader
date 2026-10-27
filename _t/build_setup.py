@@ -22,7 +22,6 @@ build_setup.py · 小助下载管理器 XZDM 安装包构建脚本
 
 from __future__ import annotations
 
-import base64
 import os
 import shutil
 import subprocess
@@ -48,8 +47,8 @@ a = Analysis(
     ["setup.py"],
     pathex=[ROOT],
     binaries=[],
-    datas=[],
-    hiddenimports=["ctypes", "ctypes.wintypes", "winreg", "subprocess", "shutil", "zipfile", "base64", "tempfile", "time", "sys"],
+    datas=[("payload.zip", ".")],                          # ★ v3.1.12：ZIP 二进制直嵌，替代 base64
+    hiddenimports=["ctypes", "ctypes.wintypes", "winreg", "subprocess", "shutil", "zipfile", "tempfile", "time", "sys"],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
@@ -66,8 +65,8 @@ exe = EXE(
     name="{setup_name}",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
+    strip=True,                                    # ★ v3.1.12 瘦身
+    upx=True,                                      # ★ v3.1.12 瘦身：安装器自身也用 UPX 压缩
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -86,7 +85,6 @@ SETUP_PY_HEADER = r'''#!/usr/bin/env python3
 """
 from __future__ import annotations
 
-import base64
 import ctypes
 import ctypes.wintypes  # noqa: F401  强制 PyInstaller 打包 ctypes.wintypes
 from ctypes import wintypes
@@ -128,7 +126,6 @@ INSTALL_DIR = _get_install_dir()
 START_MENU = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\\Windows\\Start Menu\\Programs", APP_NAME)
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall" + "\\\\" + APP_ID
 
-PAYLOAD_ZIP_B64 = """
 '''
 
 SETUP_PY_FOOTER = r'''
@@ -337,10 +334,10 @@ def _get_existing_install_dir() -> str:
 
 
 def _extract():
-    zip_bytes = base64.b64decode(PAYLOAD_ZIP_B64)
-    tmp_zip = os.path.join(tempfile.gettempdir(), "xzd_payload.zip")
-    with open(tmp_zip, "wb") as f:
-        f.write(zip_bytes)
+    # ★ v3.1.12：从 PyInstaller _MEIPASS 读 ZIP 二进制，替代 base64 解码（省 +33% 膨胀）
+    meipass = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    tmp_zip = os.path.join(meipass, "payload.zip")
+    _log(f"extract start meipass={meipass} zip_exists={os.path.exists(tmp_zip)} install_dir={INSTALL_DIR}")
     # v3.0.8: 若本机已有旧版安装在其他目录，先迁移/清理，确保最终安装在 INSTALL_DIR
     prev = _get_existing_install_dir()
     if prev and prev != INSTALL_DIR and os.path.isdir(prev):
@@ -360,10 +357,7 @@ def _extract():
     os.makedirs(INSTALL_DIR, exist_ok=True)
     with zipfile.ZipFile(tmp_zip, "r") as z:
         z.extractall(INSTALL_DIR)
-    try:
-        os.remove(tmp_zip)
-    except Exception:
-        pass
+    _log(f"extract ok files={len(os.listdir(INSTALL_DIR))}")
     return INSTALL_DIR
 
 
@@ -653,7 +647,10 @@ def _show_result_dialog(title: str, message: str, buttons: list[tuple[str, str]]
 
     root = tk.Tk()
     root.title(title)
-    root.geometry("420x200")
+    # 按钮宽度按字数自适应：2按钮520，3按钮580；高度240
+    n_btns = len(buttons)
+    w0 = 520 if n_btns <= 2 else 600
+    root.geometry(f"{w0}x240")
     root.resizable(False, False)
     root.configure(bg="#f8f9fa")
     root.attributes("-topmost", True)
@@ -662,22 +659,27 @@ def _show_result_dialog(title: str, message: str, buttons: list[tuple[str, str]]
     except Exception:
         pass
 
+    FONT = ("Microsoft YaHei UI", 10)
     frm = tk.Frame(root, bg="#f8f9fa", padx=20, pady=20)
     frm.pack(fill=tk.BOTH, expand=True)
 
-    lbl = tk.Label(frm, text=message, justify=tk.LEFT, wraplength=360,
-                   bg="#f8f9fa", fg="#212529", font=("Microsoft YaHei UI", 10))
+    lbl = tk.Label(frm, text=message, justify=tk.LEFT, wraplength=w0 - 60,
+                   bg="#f8f9fa", fg="#212529", font=FONT)
     lbl.pack(fill=tk.BOTH, expand=True, anchor=tk.W)
 
+    # tk.Button 宽度更可预测（字符数），配合字体和内部留白保证中文清晰可见
     btn_frm = tk.Frame(frm, bg="#f8f9fa")
-    btn_frm.pack(fill=tk.X, pady=(10, 0))
+    btn_frm.pack(fill=tk.X, pady=(12, 0))
     for label, val in buttons:
-        ttk.Button(btn_frm, text=label, command=lambda v=val: choose(v)).pack(side=tk.RIGHT, padx=5)
+        btn = tk.Button(btn_frm, text=label, font=FONT, width=8, padx=12, pady=4,
+                        bg="#e9ecef", fg="#212529", activebackground="#dee2e6",
+                        activeforeground="#000000", relief="flat", borderwidth=1,
+                        cursor="hand2", command=lambda v=val: choose(v))
+        btn.pack(side=tk.RIGHT, padx=6)
 
     root.update_idletasks()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    w, h = root.winfo_width(), root.winfo_height()
-    root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    root.geometry(f"+{(sw - w0) // 2}+{(sh - 240) // 2}")
     root.mainloop()
     return result
 
@@ -909,18 +911,15 @@ if __name__ == "__main__":
 '''
 
 
-def _zip_payload() -> bytes:
-    tmp = os.path.join(tempfile.gettempdir(), "xzd_payload.zip")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+def _zip_payload(dst: str) -> str:
+    """v3.1.12：保存 ZIP 到文件（供 PyInstaller datas 二进制直嵌），不再 base64 编码。"""
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(SRC_DIR):
             for fn in files:
                 full = os.path.join(root, fn)
                 arc = os.path.relpath(full, SRC_DIR)
                 zf.write(full, arc)
-    with open(tmp, "rb") as f:
-        data = f.read()
-    os.remove(tmp)
-    return data
+    return dst
 
 
 def run():
@@ -946,17 +945,13 @@ def run():
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # 1) 生成 setup.py
-    zip_data = _zip_payload()
-    b64 = base64.b64encode(zip_data).decode("ascii")
+    # 1) 生成 setup.py（v3.1.12：ZIP 以二进制直嵌，不再 base64 编码）
     setup_name = f"小助下载器_v{VERSION}_安装包"
+    payload_zip = os.path.join(OUT_DIR, "payload.zip")
+    _zip_payload(payload_zip)
     setup_py = os.path.join(OUT_DIR, "setup.py")
     with open(setup_py, "w", encoding="utf-8") as f:
         f.write(SETUP_PY_HEADER.format(app_name=APP_NAME, app_id=APP_ID, version=VERSION))
-        # 每 76 字符一行 base64
-        for i in range(0, len(b64), 76):
-            f.write(b64[i:i + 76] + "\n")
-        f.write('"""\n')
         f.write(SETUP_PY_FOOTER)
 
     # 2) 复制图标

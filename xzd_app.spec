@@ -106,6 +106,17 @@ a = Analysis(
     optimize=1,          # 去掉 assert 与 __debug__ 分支（本程序无 assert，纯省体积）
 )
 
+# ★ v3.1.12 瘦身：剔除 Tcl 非必要数据（仅保留核心脚本，砍掉 tcltest/http 等）
+#   tcl8 仅 5 文件 276KB，已是最小集，剔除 tcltest(测试框架) 和 http(tcl http 包)
+#   PyInstaller TOC 条目可能是 (name,src,type) 三元组，保留原结构只过滤
+_tcl_filtered_datas = []
+for _item in a.datas:
+    _name = _item[0]  # 目标路径
+    _low = _name.lower().replace('\\', '/')
+    if '/tcl8/8.5/tcltest' in _low or '/tcl8/8.6/http' in _low:
+        continue
+    _tcl_filtered_datas.append(_item)
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -117,7 +128,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,            # 不用 UPX：UPX 压过的 exe 常被安全软件误报，且解压拖慢冷启动
+    upx=True,             # ★ v3.1.12 瘦身：启用 UPX 压缩 DLL/PYD（预计省 ~8MB）
     console=False,        # 无控制台窗口 ← 静默启动的关键
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -131,9 +142,9 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a.datas,
+    _tcl_filtered_datas,
     strip=False,
-    upx=False,
+    upx=True,             # ★ v3.1.12 瘦身：DLL/PYD 使用 UPX 压缩
     upx_exclude=[],
     name="小助下载器",
 )
