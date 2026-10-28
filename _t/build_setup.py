@@ -35,7 +35,7 @@ if os.path.basename(ROOT) == "_t":
 
 APP_NAME = "小助下载器"
 APP_ID = "XiaozhuDownloader"
-VERSION = "3.1.11"
+VERSION = "3.1.14"
 SRC_DIR = os.path.join(ROOT, "dist_app", "小助下载器")
 OUT_DIR = os.path.join(ROOT, "dist_setup")
 SPEC_FILE = os.path.join(OUT_DIR, "setup.spec")
@@ -48,7 +48,7 @@ a = Analysis(
     pathex=[ROOT],
     binaries=[],
     datas=[("payload.zip", ".")],                          # ★ v3.1.12：ZIP 二进制直嵌，替代 base64
-    hiddenimports=["ctypes", "ctypes.wintypes", "winreg", "subprocess", "shutil", "zipfile", "tempfile", "time", "sys"],
+    hiddenimports=["ctypes", "ctypes.wintypes", "winreg", "subprocess", "shutil", "zipfile", "tempfile", "time", "sys", "tkinter"],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
@@ -791,12 +791,22 @@ def _repair():
     time.sleep(0.5)
     helper = _shell_copy_self_to_temp()
     pid = os.getpid()
-    cmd = f'"{helper}" __DO_REPAIR__ "{INSTALL_DIR}" "{pid}" "{installer_tmp}"'
-    _log(f"launching repair helper: {cmd}")
-    subprocess.Popen(cmd, shell=True,
-                     creationflags=0x00000008,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _log(f"repair: helper={helper} installer_tmp={installer_tmp} install_dir={INSTALL_DIR} pid={pid}")
+    try:
+        subprocess.Popen([helper, "__DO_REPAIR__", INSTALL_DIR, str(pid), installer_tmp],
+                         creationflags=0x00000008,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        _log(f"repair: Popen failed: {e}")
+        # 降级：直接启动临时安装器（会弹出安装界面）
+        try:
+            subprocess.Popen([installer_tmp],
+                             creationflags=0x00000008,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e2:
+            _log(f"repair: fallback Popen also failed: {e2}")
     _log("repair helper launched, exiting")
+    time.sleep(0.3)  # 确保子进程已创建
     os._exit(0)
 
 

@@ -84,6 +84,10 @@
   .row.task { align-items: stretch; }
   .acts-hist { display: flex; gap: 5px; }
   .acts-hist button { padding: 3px 8px; font-size: 11px; }
+  .acts-hist button.del { background: #fce8e6; color: #d93025; }
+  .acts-hist button.del:hover { background: #f5c6cb; }
+  .hist-clear { display: none; }
+  .hist-clear.show { display: block; }
 </style>
 </head>
 <body>
@@ -92,6 +96,7 @@
     <div class="acts">
       <button class="mini" id="btn-scan">分析页面</button>
       <button class="mini" id="btn-clear">清空</button>
+      <button class="mini hist-clear" id="btn-clear-hist">清空记录</button>
     </div>
   </div>
   <div class="status" id="status">正在检测下载器…</div>

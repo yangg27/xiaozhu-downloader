@@ -53,7 +53,7 @@ import uuid
 
 APP_NAME = "小助下载器"
 APP_ID = "xiaozhu-downloader"
-ENGINE_VERSION = "3.1.11"
+ENGINE_VERSION = "3.1.14"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -4142,6 +4142,34 @@ class Manager:
     def history(self, limit: int = 100) -> list[dict]:
         with self._lock:
             return list(self._history[-max(1, limit):])
+
+    def delete_history(self, tid: str) -> bool:
+        """删除单条历史记录，返回是否找到并删除"""
+        with self._lock:
+            before = len(self._history)
+            self._history = [h for h in self._history if h.get("tid") != tid]
+            if len(self._history) == before:
+                return False
+            self._save_history_nolock()
+            return True
+
+    def clear_history(self) -> int:
+        """清空全部历史记录，返回被清除的条数"""
+        with self._lock:
+            n = len(self._history)
+            self._history = []
+            self._save_history_nolock()
+            return n
+
+    def _save_history_nolock(self):
+        """内部方法：在持有 self._lock 的前提下落盘历史文件"""
+        tmp = self._history_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._history, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._history_path)
+        except Exception:
+            pass
 
     # ---- 持久化 ----
     def save_jobs(self):

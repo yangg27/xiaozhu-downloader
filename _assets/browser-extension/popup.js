@@ -66,6 +66,18 @@ function setTab(name) {
     btnAll.style.display = 'none';
     hint.textContent = name === 'tasks' ? '点击任务可查看详情' : '右键扩展图标可打开最近文件/目录';
   }
+  // ★ 历史页显示清空记录按钮
+  const btnCH = $('btn-clear-hist');
+  const btnCL = $('btn-clear');
+  if (btnCH && btnCL) {
+    if (name === 'history') {
+      btnCL.style.display = 'none';
+      btnCH.classList.add('show');
+    } else {
+      btnCL.style.display = '';
+      btnCH.classList.remove('show');
+    }
+  }
   render();
 }
 
@@ -240,6 +252,29 @@ function renderHistory(list) {
     });
 
     acts.append(btnOpen, btnDir);
+    // ★ 删除单条记录
+    const btnDel = document.createElement('button');
+    btnDel.className = 'del';
+    btnDel.textContent = '删除';
+    btnDel.title = '从历史记录中移除（不删除文件）';
+    btnDel.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.textContent = '…';
+      btn.disabled = true;
+      const r = await send({ cmd: 'deleteHistory', tid: it.tid });
+      if (r && r.ok) {
+        showHint('已移除');
+        // 从本地数组移除该条，立即刷新列表
+        const idx = currentHistory.findIndex((h) => h.tid === it.tid);
+        if (idx >= 0) currentHistory.splice(idx, 1);
+        render();
+      } else {
+        showHint('删除失败：' + ((r && r.error) || '未知'), true);
+        btn.textContent = '删除';
+        btn.disabled = false;
+      }
+    });
+    acts.append(btnDel);
     row.append(tag, name, size, acts);
     if (gone) row.title = '文件已不在原位置（仍可打开所在目录）';
     list.appendChild(row);
@@ -335,6 +370,25 @@ function setup() {
     await send({ cmd: 'clear', tabId: currentTab ? currentTab.id : null });
     refresh();
   });
+  // ★ 清空全部历史记录
+  const btnCH = $('btn-clear-hist');
+  if (btnCH) {
+    btnCH.addEventListener('click', async () => {
+      if (!confirm('确定清空全部已完成下载记录？（不会删除已下载的文件）')) return;
+      btnCH.textContent = '…';
+      btnCH.disabled = true;
+      const r = await send({ cmd: 'clearHistory' });
+      btnCH.textContent = '清空记录';
+      btnCH.disabled = false;
+      if (r && r.ok) {
+        currentHistory = [];
+        render();
+        showHint(`已清空 ${r.cleared || 0} 条记录`);
+      } else {
+        showHint('清空失败：' + ((r && r.error) || '未知'), true);
+      }
+    });
+  }
   $('btn-all').addEventListener('click', async () => {
     const items = currentTabItems || [];
     if (!items.length) { $('hint').textContent = '没有可下载的媒体'; return; }

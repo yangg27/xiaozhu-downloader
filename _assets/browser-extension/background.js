@@ -519,6 +519,40 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         reply({ ok: true });
         break;
       }
+      case 'deleteHistory': {
+        const tid = msg.tid || '';
+        if (!tid) { reply({ ok: false, error: '缺少 tid' }); break; }
+        const ok = await ensureToken();
+        if (!ok) { reply({ ok: false, error: '未连接下载器' }); break; }
+        try {
+          const r = await xzdFetch(`http://127.0.0.1:${state.port}/history/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
+            body: JSON.stringify({ tid })
+          });
+          const j = await r.json().catch(() => ({}));
+          reply(j);
+        } catch (e) {
+          reply({ ok: false, error: e.message });
+        }
+        break;
+      }
+      case 'clearHistory': {
+        const ok = await ensureToken();
+        if (!ok) { reply({ ok: false, error: '未连接下载器' }); break; }
+        try {
+          const r = await xzdFetch(`http://127.0.0.1:${state.port}/history/clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-XZD-Token': state.token },
+            body: JSON.stringify({})
+          });
+          const j = await r.json().catch(() => ({}));
+          reply(j);
+        } catch (e) {
+          reply({ ok: false, error: e.message });
+        }
+        break;
+      }
       default:
         reply({ ok: false, error: 'unknown cmd' });
     }

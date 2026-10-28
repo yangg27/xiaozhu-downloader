@@ -424,6 +424,15 @@ class LocalAPI:
                     except Exception as e:
                         return self._json({"ok": False,
                                            "error": f"{type(e).__name__}: {e}"}, 500)
+                if path == "/history/delete":
+                    tid = (body or {}).get("tid", "").strip()
+                    if not tid:
+                        return self._json({"ok": False, "error": "缺少 tid 参数"}, 400)
+                    found = api.mgr.delete_history(tid)
+                    return self._json({"ok": True, "deleted": found})
+                if path == "/history/clear":
+                    n = api.mgr.clear_history()
+                    return self._json({"ok": True, "cleared": n})
                 return self._json({"ok": False, "error": "未知接口"}, 404)
 
         # 只绑定 127.0.0.1

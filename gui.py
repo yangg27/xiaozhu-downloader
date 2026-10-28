@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小助下载器 · 图形界面  gui.py   v3.1.11
+小助下载器 · 图形界面  gui.py   v3.1.14
 =============================
 基于 tkinter 的本地下载管理器界面，零依赖、纯离线。
 
@@ -71,19 +71,60 @@ import sysintegration  # noqa: E402
 
 boot_mark("imports_done")
 
-# ------------------------------ 视觉常量 ------------------------------
+# ------------------------------ 视觉常量 v3.1.14 浅色/深色双主题 ------------------------------
 FONT = "Microsoft YaHei UI"
 FONT_FB = "Microsoft YaHei"
-BG = "#f5f6f8"
-CARD = "#ffffff"
-FG = "#1f2329"
-FG_DIM = "#7a828e"
-ACCENT = "#2f6fed"
-ACCENT_DARK = "#1f5bd4"
-OK = "#0f9d58"
-WARN = "#f29900"
-ERR = "#d93025"
-BORDER = "#e3e6eb"
+
+# ── 主题色盘 ──
+_LIGHT_PALETTE = {
+    "BG": "#f5f6f8", "CARD": "#ffffff", "FG": "#1f2329", "FG_DIM": "#7a828e",
+    "ACCENT": "#2f6fed", "ACCENT_DARK": "#1f5bd4", "OK": "#0f9d58",
+    "WARN": "#f29900", "ERR": "#d93025", "BORDER": "#e3e6eb",
+}
+_DARK_PALETTE = {
+    "BG": "#0d1117", "CARD": "#161b22", "FG": "#e6edf3", "FG_DIM": "#8b949e",
+    "ACCENT": "#3b82f6", "ACCENT_DARK": "#2563eb", "OK": "#238636",
+    "WARN": "#d29922", "ERR": "#da3633", "BORDER": "#30363d",
+}
+
+# 当前主题色（运行时可变）
+BG = ""
+CARD = ""
+FG = ""
+FG_DIM = ""
+ACCENT = ""
+ACCENT_DARK = ""
+OK = ""
+WARN = ""
+ERR = ""
+BORDER = ""
+
+def _set_theme_colors(palette: dict):
+    """将模块级颜色常量指向指定色盘。"""
+    for k, v in palette.items():
+        globals()[k] = v
+
+def apply_theme(dark: bool):
+    """切换主题色盘（更新模块级颜色变量），返回是否为深色。"""
+    _set_theme_colors(_DARK_PALETTE if dark else _LIGHT_PALETTE)
+    return dark
+
+# 派生色：由主题色计算（不参与色盘 swap，但引用 BG/CARD/FG 等变量）
+def _theme_btn_bg(): return "#eef1f6" if BG != "#0d1117" else "#21262d"
+def _theme_btn_active(): return "#e2e7ee" if BG != "#0d1117" else "#30363d"
+def _theme_entry_bg(): return "#ffffff" if BG != "#0d1117" else "#0d1117"
+def _theme_tree_head_bg(): return "#eef1f6" if BG != "#0d1117" else "#21262d"
+def _theme_tree_sel(): return "#dbe7ff" if BG != "#0d1117" else "#1f2a3d"
+def _theme_hover(): return "#eef4ff" if BG != "#0d1117" else "#1a2332"
+def _theme_tab_bg(): return "#e9ecf1" if BG != "#0d1117" else "#21262d"
+def _theme_tab_sel_bg(): return "#ffffff" if BG != "#0d1117" else "#161b22"
+def _theme_del_btn_bg(): return "#fff0f0" if BG != "#0d1117" else "#2d181a"
+def _theme_del_btn_fg(): return "#c5221f" if BG != "#0d1117" else "#da3633"
+def _theme_err_bg(): return "#fff0f0" if BG != "#0d1117" else "#1f1315"
+
+# 默认浅色（启动时 App.__init__ 会从配置读实际值覆盖）
+_set_theme_colors(_LIGHT_PALETTE)
+
 FONT_FAMILY = None
 
 STATE_COLORS = {
@@ -233,11 +274,11 @@ class MergeAVDialog(Dialog):
     def _file_row(self, parent, label, var, r, ftypes):
         tk.Label(parent, text=label, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=r, column=0, sticky="w", pady=(0, 10))
-        e = tk.Entry(parent, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG,
+        e = tk.Entry(parent, textvariable=var, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                      relief="solid", bd=1, highlightthickness=1,
                      highlightbackground=BORDER, highlightcolor=ACCENT, width=44)
         e.grid(row=r, column=1, sticky="we", pady=(0, 10), ipady=4)
-        tk.Button(parent, text="浏览", font=(FONT, 9), bg="#eef1f6", fg=FG,
+        tk.Button(parent, text="浏览", font=(FONT, 9), bg=_theme_btn_bg(), fg=FG,
                   relief="flat", padx=10, cursor="hand2",
                   command=lambda: self._pick(var, ftypes)).grid(
             row=r, column=2, padx=(8, 0), pady=(0, 10))
@@ -267,7 +308,7 @@ class MergeAVDialog(Dialog):
         btns = tk.Frame(f, bg=BG)
         btns.grid(row=5, column=0, columnspan=3, sticky="e")
         tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9),
-                  bg="#eef1f6", fg=FG, relief="flat", padx=16, pady=5,
+                  bg=_theme_btn_bg(), fg=FG, relief="flat", padx=16, pady=5,
                   cursor="hand2").pack(side="left", padx=(0, 8))
         self.btn_merge = tk.Button(btns, text="开始合并", command=self._merge,
                                    font=(FONT, 10, "bold"), bg=ACCENT, fg="#fff",
@@ -322,7 +363,7 @@ class NewDownloadDialog(Dialog):
         tk.Label(parent, text=label, bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=r, column=0, sticky="w", pady=(0, 8))
         e = tk.Entry(parent, textvariable=var, font=(FONT, 9), show=show,
-                     bg="#fff", fg=FG, relief="solid", bd=1,
+                     bg=_theme_entry_bg(), fg=FG, relief="solid", bd=1,
                      highlightthickness=1, highlightbackground=BORDER,
                      highlightcolor=ACCENT, width=width)
         e.grid(row=r, column=1, sticky="we", pady=(0, 8), ipady=4)
@@ -341,7 +382,7 @@ class NewDownloadDialog(Dialog):
         # 多行 URL 输入
         url_frame = tk.Frame(f, bg=BG)
         url_frame.grid(row=2, column=1, sticky="we", pady=(0, 8))
-        self.t_url = tk.Text(url_frame, height=5, font=(FONT, 9), bg="#fff", fg=FG,
+        self.t_url = tk.Text(url_frame, height=5, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                              relief="solid", bd=1, wrap="none")
         self.t_url.pack(side="left", fill="both", expand=True)
         sb = tk.Scrollbar(url_frame, orient="vertical", command=self.t_url.yview)
@@ -355,21 +396,21 @@ class NewDownloadDialog(Dialog):
         torrent_row = tk.Frame(f, bg=BG)
         torrent_row.grid(row=3, column=1, sticky="we", pady=(0, 12))
         self.v_torrent = tk.StringVar(value="")
-        tk.Entry(torrent_row, textvariable=self.v_torrent, font=(FONT, 9), bg="#fff", fg=FG,
+        tk.Entry(torrent_row, textvariable=self.v_torrent, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                  relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
                  highlightcolor=ACCENT, state="readonly").pack(side="left", fill="x", expand=True, ipady=4)
         tk.Button(torrent_row, text="选择种子文件", command=self._pick_torrent, font=(FONT, 9),
-                  bg="#eef1f6", fg=FG, relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(6, 0))
+                  bg=_theme_btn_bg(), fg=FG, relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(6, 0))
         tk.Label(f, text="种子文件", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=3, column=0, sticky="w", pady=(0, 12))
 
         fr = tk.Frame(f, bg=BG)
         fr.grid(row=4, column=1, sticky="we", pady=(0, 8))
-        tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
+        tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                  relief="solid", bd=1, highlightthickness=1,
                  highlightbackground=BORDER, highlightcolor=ACCENT).pack(
             side="left", fill="x", expand=True, ipady=4)
-        tk.Button(fr, text="浏览", command=self._pick_dir, font=(FONT, 9), bg="#eef1f6",
+        tk.Button(fr, text="浏览", command=self._pick_dir, font=(FONT, 9), bg="#21262d",
                   fg=FG, relief="flat", padx=10, cursor="hand2").pack(side="left", padx=(6, 0))
         tk.Label(f, text="保存目录", bg=BG, fg=FG_DIM, font=(FONT, 9)).grid(
             row=4, column=0, sticky="w", pady=(0, 8))
@@ -379,7 +420,7 @@ class NewDownloadDialog(Dialog):
         conn_row = tk.Frame(f, bg=BG)
         conn_row.grid(row=6, column=1, sticky="we", pady=(0, 8))
         e_conn = tk.Entry(conn_row, textvariable=self.v_conns, font=(FONT, 9),
-                          bg="#fff", fg=FG, relief="solid", bd=1,
+                          bg=_theme_entry_bg(), fg=FG, relief="solid", bd=1,
                           highlightthickness=1, highlightbackground=BORDER,
                           highlightcolor=ACCENT, width=8)
         e_conn.pack(side="left", ipady=4)
@@ -392,7 +433,7 @@ class NewDownloadDialog(Dialog):
         tip.grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 10))
         btns = tk.Frame(f, bg=BG)
         btns.grid(row=10, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
+        tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg=_theme_btn_bg(),
                   fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="开始下载", command=self._ok, font=(FONT, 10, "bold"),
                   bg=ACCENT, fg="#fff", relief="flat", padx=18, pady=5,
@@ -646,11 +687,11 @@ class SettingsDialog(Dialog):
             fr = tk.Frame(f, bg=BG)
             fr.grid(row=r, column=c, columnspan=span, rowspan=row_span,
                     sticky="we" if wide else "w", pady=(0, 6))
-            e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg="#fff", fg=FG, width=w,
+            e = tk.Entry(fr, textvariable=var, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG, width=w,
                          relief="solid", bd=1, highlightthickness=1,
                          highlightbackground=BORDER, highlightcolor=ACCENT)
             e.pack(side="top", fill="x" if wide else "none", expand=bool(wide), ipady=3)
-            err = tk.Label(fr, text="", bg="#fff5f5", fg=ERR, font=(FONT, 8),
+            err = tk.Label(fr, text="", bg=_theme_err_bg(), fg=ERR, font=(FONT, 8),
                            anchor="w", padx=4)
             key = name or f"row{r}"
             self._entries[key] = e
@@ -662,7 +703,7 @@ class SettingsDialog(Dialog):
 
         def cb(text, var, r, c, cs=1):
             b = tk.Checkbutton(f, text=text, variable=var, bg=BG, fg=FG, font=(FONT, 9),
-                               activebackground=BG, selectcolor="#fff")
+                               activebackground=BG, selectcolor=ACCENT)
             b.grid(row=r, column=c, columnspan=cs, sticky="w", pady=(0, 4))
             return b
 
@@ -674,15 +715,15 @@ class SettingsDialog(Dialog):
         lbl(1, 0, "默认保存目录", span=7)
         fr = tk.Frame(f, bg=BG)
         fr.grid(row=2, column=0, columnspan=7, sticky="we", pady=(0, 10))
-        e_dir = tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg="#fff", fg=FG,
+        e_dir = tk.Entry(fr, textvariable=self.v_dir, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                          relief="solid", bd=1, highlightthickness=1,
                          highlightbackground=BORDER, highlightcolor=ACCENT)
         e_dir.pack(side="left", fill="x", expand=True, ipady=3)
         self._entries["row1"] = e_dir
-        self._errors["row1"] = tk.Label(fr, text="", bg="#fff5f5", fg=ERR,
+        self._errors["row1"] = tk.Label(fr, text="", bg=_theme_err_bg(), fg=ERR,
                                         font=(FONT, 8), anchor="w", padx=4)
         tk.Button(fr, text="浏览", command=lambda: self._pick(self.v_dir),
-                  font=(FONT, 9), bg="#eef1f6", fg=FG, relief="flat", padx=10,
+                  font=(FONT, 9), bg=_theme_btn_bg(), fg=FG, relief="flat", padx=10,
                   cursor="hand2").pack(side="left", padx=(6, 0))
 
         # 数值类：每行两个（标签 + 短输入 + 说明同行）
@@ -726,11 +767,11 @@ class SettingsDialog(Dialog):
         tk.Radiobutton(eng_frame, text="内置多线程引擎（默认，最快）",
                        variable=self.v_engine, value="builtin",
                        bg=BG, fg=FG, font=(FONT, 9),
-                       activebackground=BG, selectcolor="#fff").pack(side="left", padx=(0, 12))
+                       activebackground=BG, selectcolor=ACCENT).pack(side="left", padx=(0, 12))
         tk.Radiobutton(eng_frame, text="aria2c 引擎（兼容性最强）",
                        variable=self.v_engine, value="aria2",
                        bg=BG, fg=FG, font=(FONT, 9),
-                       activebackground=BG, selectcolor="#fff").pack(side="left")
+                       activebackground=BG, selectcolor=ACCENT).pack(side="left")
 
         lbl(14, 0, "BT Trackers 源", span=7)
         ent(self.v_bt_source, 15, 0, 40, name="row14", span=7, wide=True)
@@ -750,9 +791,13 @@ class SettingsDialog(Dialog):
                                self.v_autostart, 19, 0, cs=3)
         self.cb_protocol = cb("注册 xzd:// 协议（浏览器点击自动唤起）",
                               self.v_protocol, 19, 4, cs=3)
+        # 深色模式开关
+        self.v_dark_mode = tk.BooleanVar(value=getattr(self.app, "_dark_mode", False))
+        self.cb_dark_mode = cb("深色模式（浅色更护眼，重启后完全生效）",
+                               self.v_dark_mode, 20, 0, cs=7)
         self.lbl_si = tk.Label(f, text="", bg=BG, fg=FG_DIM, font=(FONT, 8),
                                justify="left", wraplength=660)
-        self.lbl_si.grid(row=20, column=0, columnspan=7, sticky="w", pady=(0, 4))
+        self.lbl_si.grid(row=21, column=0, columnspan=7, sticky="w", pady=(0, 4))
         if self.si is None:
             self.cb_autostart.config(state="disabled")
             self.cb_protocol.config(state="disabled")
@@ -761,7 +806,7 @@ class SettingsDialog(Dialog):
             self._refresh_si_label()
 
         tk.Label(f, text="全程离线：不检查更新、不联网校验、不上报任何数据",
-                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=21, column=0, columnspan=7,
+                 bg=BG, fg=OK, font=(FONT, 8)).grid(row=22, column=0, columnspan=7,
                                                       sticky="w", pady=(0, 6))
 
         # 底部按钮栏（固定，不随内容滚动）
@@ -770,9 +815,9 @@ class SettingsDialog(Dialog):
         self._reset_hint = tk.Label(btns, text="", bg=BG, fg=OK, font=(FONT, 9))
         self._reset_hint.pack(side="left", padx=(0, 12))
         tk.Button(btns, text="恢复默认设置", command=self._reset_defaults, font=(FONT, 9),
-                  bg="#fff0f0", fg="#c5221f", relief="flat", padx=12, pady=4,
+                  bg=_theme_del_btn_bg(), fg=_theme_del_btn_fg(), relief="flat", padx=12, pady=4,
                   cursor="hand2").pack(side="left", padx=(0, 12))
-        tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
+        tk.Button(btns, text="取消", command=self.destroy, font=(FONT, 9), bg=_theme_btn_bg(),
                   fg=FG, relief="flat", padx=18, pady=4, cursor="hand2").pack(side="left", padx=6)
         tk.Button(btns, text="保存", command=self._ok, font=(FONT, 10, "bold"), bg=ACCENT,
                   fg="#fff", relief="flat", padx=18, pady=4, activebackground=ACCENT_DARK,
@@ -878,7 +923,16 @@ class SettingsDialog(Dialog):
             bt_tracker_source=self.v_bt_source.get().strip() or "https://cf.trackerslist.com/best.txt",
             bt_trackers_autoupdate=bool(self.v_bt_autoupdate.get()),
             bt_tracker_probe_alive=bool(self.v_bt_probe_alive.get()),
+            # v3.1.12: 主题
+            theme="dark" if bool(self.v_dark_mode.get()) else "light",
         )
+        msgs = []
+        # v3.1.12: 主题切换（立即生效，完全效果需重启）
+        if self.app:
+            want_dark = bool(self.v_dark_mode.get())
+            if want_dark != getattr(self.app, "_dark_mode", False):
+                self.app.apply_theme_to_ui(want_dark)
+                msgs.append("主题已切换为" + ("深色" if want_dark else "浅色") + "模式")
         # 剪贴板监听开关立即生效
         if self.app:
             self.app._toggle_clipboard(bool(self.v_clipboard.get()))
@@ -887,7 +941,6 @@ class SettingsDialog(Dialog):
             if t.speed_limit or limit:
                 t.set_speed_limit(limit)
         # 应用系统集成开关
-        msgs = []
         if self.si:
             try:
                 want_auto = bool(self.v_autostart.get())
@@ -1074,7 +1127,7 @@ class HelpDialog(Dialog):
                          "可在设置页按 Ctrl+Alt+P 重新截图保存。",
                  bg=BG, fg=FG_DIM, font=(FONT, 8), wraplength=520,
                  justify="left").pack(anchor="w", pady=(0, 6))
-        self._img_lbl = tk.Label(f, text="未找到默认设置截图", bg="#eef1f6", fg=FG_DIM,
+        self._img_lbl = tk.Label(f, text="未找到默认设置截图", bg=_theme_btn_bg(), fg=FG_DIM,
                                  font=(FONT, 9), width=60, height=12, relief="flat")
         self._img_lbl.pack(anchor="w", pady=(0, 8))
         self._load_default_settings_image()
@@ -1082,7 +1135,7 @@ class HelpDialog(Dialog):
         # 关闭按钮
         btns = tk.Frame(outer, bg=BG)
         btns.grid(row=1, column=0, columnspan=2, sticky="e", padx=18, pady=(8, 12))
-        tk.Button(btns, text="关闭", command=self.destroy, font=(FONT, 9), bg="#eef1f6",
+        tk.Button(btns, text="关闭", command=self.destroy, font=(FONT, 9), bg=_theme_btn_bg(),
                   fg=FG, relief="flat", padx=18, pady=5, cursor="hand2").pack(side="left")
 
     def _load_default_settings_image(self):
@@ -1156,7 +1209,7 @@ class WebScanDialog(Dialog):
         top = tk.Frame(self, bg=BG, padx=16, pady=12)
         top.pack(fill="x")
         tk.Label(top, text="网页地址", bg=BG, fg=FG_DIM, font=(FONT, 9)).pack(side="left")
-        e = tk.Entry(top, textvariable=self.v_url, font=(FONT, 9), bg="#fff", fg=FG,
+        e = tk.Entry(top, textvariable=self.v_url, font=(FONT, 9), bg=_theme_entry_bg(), fg=FG,
                      relief="solid", bd=1, highlightthickness=1, highlightbackground=BORDER,
                      highlightcolor=ACCENT)
         e.pack(side="left", fill="x", expand=True, padx=8, ipady=4)
@@ -1185,7 +1238,7 @@ class WebScanDialog(Dialog):
         tk.Button(bot, text="全部下载", command=self._dl_all, font=(FONT, 10, "bold"),
                   bg=OK, fg="#fff", relief="flat", padx=14, pady=4, cursor="hand2").pack(side="right")
         tk.Button(bot, text="仅音频", command=lambda: self._dl_sel(audio_only=True),
-                  font=(FONT, 9), bg="#e67e22", fg="#fff", relief="flat", padx=14, pady=4,
+                  font=(FONT, 9), bg="#d29922", fg="#fff", relief="flat", padx=14, pady=4,
                   cursor="hand2").pack(side="right", padx=6)
         tk.Button(bot, text="下载视频", command=lambda: self._dl_sel(audio_only=False),
                   font=(FONT, 9), bg=ACCENT, fg="#fff", relief="flat", padx=14, pady=4,
@@ -1311,6 +1364,9 @@ class App:
     def __init__(self, silent: bool = False, protocol_url: str = ""):
         self.silent = silent
         self.protocol_url = protocol_url or ""
+        # ★ v3.1.12: 主题从配置读取后再创建窗口（默认浅色）
+        self._dark_mode = self._load_theme_from_config()
+        apply_theme(self._dark_mode)
         # v3.0.8: 开启 DPI 感知，解决 125%/150% 缩放下字体图标模糊
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -1539,24 +1595,54 @@ class App:
             # 协议唤起失败 = 用户点了下载链接却"毫无反应"，必须留痕
             dlcore.LOG.once_exc("protocol", "协议唤起处理失败 url=%r", url)
 
-    # ---------- 样式 ----------
+    # ---------- 样式 / 主题 ----------
+    @staticmethod
+    def _load_theme_from_config() -> bool:
+        """从配置文件读取主题设置（默认浅色 false）。"""
+        try:
+            import json
+            base = os.environ.get("APPDATA") or os.path.expanduser("~")
+            cfg_path = os.path.join(base, dlcore.APP_NAME, "config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                return str(cfg.get("theme", "light")).lower() == "dark"
+        except Exception:
+            pass
+        return False
+
+    def apply_theme_to_ui(self, dark: bool):
+        """应用主题：更新颜色常量 + 刷新样式 + 写入配置。"""
+        self._dark_mode = dark
+        apply_theme(dark)
+        try:
+            self.root.configure(bg=BG)
+            self._setup_style()
+            # 刷新树标签
+            self.tree.tag_configure("hover", background=_theme_hover())
+        except Exception:
+            pass
+        self.refresh_now()
+
     def _setup_style(self):
         st = ttk.Style()
         try:
             st.theme_use("clam")
         except Exception:
             dlcore.LOG.debug('忽略异常：st.theme_use("clam")')
+        B2 = _theme_btn_bg(); BA = _theme_btn_active(); TS = _theme_tree_sel()
+        TB = _theme_tab_bg(); TSB = _theme_tab_sel_bg()
         st.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG,
                      rowheight=30, borderwidth=0, font=(FONT, 9))
-        st.configure("Treeview.Heading", background="#eef1f6", foreground=FG_DIM,
+        st.configure("Treeview.Heading", background=B2, foreground=FG_DIM,
                      relief="flat", font=(FONT, 9, "bold"), padding=(6, 6))
-        st.map("Treeview", background=[("selected", "#dbe7ff")],
+        st.map("Treeview", background=[("selected", TS)],
                foreground=[("selected", FG)])
-        st.map("Treeview.Heading", background=[("active", "#e3e8f0")])
+        st.map("Treeview.Heading", background=[("active", BA)])
         st.configure("TNotebook", background=BG, borderwidth=0)
-        st.configure("TNotebook.Tab", background="#e9ecf1", foreground=FG_DIM,
+        st.configure("TNotebook.Tab", background=TB, foreground=FG_DIM,
                      padding=(18, 8), font=(FONT, 9), borderwidth=0)
-        st.map("TNotebook.Tab", background=[("selected", CARD)],
+        st.map("TNotebook.Tab", background=[("selected", TSB)],
                foreground=[("selected", ACCENT)])
         st.configure("TSeparator", background=BORDER)
 
@@ -1572,11 +1658,11 @@ class App:
         def btn(parent, text, cmd, primary=False, width=None, compact=False):
             b = tk.Button(parent, text=text, command=cmd,
                           font=(FONT, 8 if compact else 9),
-                          bg=ACCENT if primary else "#eef1f6",
+                          bg=ACCENT if primary else _theme_btn_bg(),
                           fg="#fff" if primary else FG, relief="flat",
                           padx=10 if compact else 14, pady=4 if compact else 5,
                           cursor="hand2",
-                          activebackground=ACCENT_DARK if primary else "#e2e7ee",
+                          activebackground=ACCENT_DARK if primary else _theme_btn_active(),
                           activeforeground="#fff" if primary else FG)
             if width:
                 b.config(width=width)
@@ -1661,7 +1747,7 @@ class App:
         self.tree.tag_configure("cancelled", foreground=FG_DIM)
         # 悬停行背景（v1.12.0）。
         # 与状态 tag 无冲突：状态 tag 只设 foreground，这个只设 background。
-        self.tree.tag_configure("hover", background="#eef4ff")
+        self.tree.tag_configure("hover", background=_theme_hover())
         self.tree.bind("<Double-1>", self._open_selected_file)
         self.tree.bind("<Button-3>", self._task_menu)
         # v1.12.0：鼠标悬停高亮。20 行以上的表格里，行间错位是常见的"看错行"来源。
@@ -1698,7 +1784,7 @@ class App:
         tk.Label(top, text="浏览器扩展嗅探到的媒体会自动出现在这里", bg=CARD, fg=FG_DIM,
                  font=(FONT, 9)).pack(side="left")
         tk.Button(top, text="清空", command=lambda: (self.mgr.clear_sniff(), self.refresh_now()),
-                  font=(FONT, 9), bg="#eef1f6", fg=FG, relief="flat", padx=12,
+                  font=(FONT, 9), bg=_theme_btn_bg(), fg=FG, relief="flat", padx=12,
                   cursor="hand2").pack(side="right")
         tk.Button(top, text="下载选中", command=self._sniff_download, font=(FONT, 9, "bold"),
                   bg=ACCENT, fg="#fff", relief="flat", padx=12, cursor="hand2").pack(side="right", padx=6)
